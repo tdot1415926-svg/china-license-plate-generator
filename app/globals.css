@@ -31,7 +31,7 @@ button,a { -webkit-tap-highlight-color:transparent; }
 .rear-number>span:first-child { letter-spacing:.12em; padding-left:.12em; }
 .rear-number>span:last-child { letter-spacing:.015em; }
 .glyph-board { position:absolute; inset:0; z-index:2; color:inherit; }
-.glyph { position:absolute; display:flex; align-items:center; justify-content:center; font-family:"DIN Alternate","Arial Narrow","Roboto Condensed","PingFang SC",sans-serif; font-size:clamp(44px,7.6vw,112px); font-weight:900; line-height:1; white-space:nowrap; transform:scaleX(.88); transform-origin:center; text-shadow:0 .5px 0 rgba(255,255,255,.14); filter:blur(.06px); }
+.glyph { position:absolute; display:flex; align-items:center; justify-content:center; font-family:"DIN Alternate","Arial Narrow","Roboto Condensed","PingFang SC",sans-serif; font-size:clamp(44px,7.6vw,112px); font-weight:900; line-height:1; white-space:nowrap; transform:scaleX(.88); transform-origin:center; text-shadow:0 .5px 0 rgba(255,255,255,.14); filter:contrast(1.45) blur(.04px); }
 .glyph-han { transform:scaleX(.62); }
 .glyph-board-rear .glyph-upper { font-size:clamp(42px,5.2vw,68px); }
 .glyph-board-rear .glyph-lower { font-size:clamp(58px,7.8vw,106px); }

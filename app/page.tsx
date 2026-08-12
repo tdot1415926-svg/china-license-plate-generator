@@ -201,17 +201,40 @@ export default function Home() {
     ctx.shadowColor = "rgba(0,0,0,.28)";
     ctx.shadowBlur = 2;
     ctx.shadowOffsetY = 3;
+    const glyphCache = new Map<string, HTMLCanvasElement>();
+    const getGlyphSprite = (char: string, boxWidth: number, boxHeight: number, color: string) => {
+      const cacheKey = `${char}-${boxWidth}-${boxHeight}-${color}`;
+      const cached = glyphCache.get(cacheKey);
+      if (cached) return cached;
+      const sprite = document.createElement("canvas");
+      sprite.width = boxWidth * 2;
+      sprite.height = boxHeight * 2;
+      const spriteCtx = sprite.getContext("2d", { willReadFrequently: true })!;
+      spriteCtx.fillStyle = color;
+      spriteCtx.textAlign = "center";
+      spriteCtx.textBaseline = "middle";
+      spriteCtx.font = `900 ${boxHeight * 2 * 1.06}px "Arial Narrow", "Noto Sans SC", sans-serif`;
+      spriteCtx.save();
+      spriteCtx.translate(sprite.width / 2, sprite.height / 2);
+      spriteCtx.scale(/[\u3400-\u9fff]/.test(char) ? .5 : .88, 1);
+      spriteCtx.fillText(char, 0, 0);
+      spriteCtx.restore();
+      // Convert anti-aliased browser text to a stable, sprite-like binary mask.
+      const pixels = spriteCtx.getImageData(0, 0, sprite.width, sprite.height);
+      for (let index = 3; index < pixels.data.length; index += 4) {
+        pixels.data[index] = pixels.data[index] > 72 ? 255 : 0;
+      }
+      spriteCtx.putImageData(pixels, 0, 0);
+      glyphCache.set(cacheKey, sprite);
+      return sprite;
+    };
     const drawGlyphs = () => {
-      ctx.fillStyle = kind === "blue" || kind === "hkmo" ? "#f8fbff" : "#101214";
+      const glyphColor = kind === "blue" || kind === "hkmo" ? "#f8fbff" : "#101214";
+      ctx.fillStyle = glyphColor;
+      ctx.imageSmoothingEnabled = false;
       glyphBoxes.forEach((box) => {
-        const centerX = (box.x + box.width / 2) * 2;
-        const centerY = (box.y + box.height / 2) * 2;
-        ctx.save();
-        ctx.translate(centerX, centerY);
-        ctx.scale(/[\u3400-\u9fff]/.test(box.char) ? .5 : .88, 1);
-        ctx.font = `900 ${box.height * 2 * 1.06}px "Arial Narrow", "Noto Sans SC", sans-serif`;
-        ctx.fillText(box.char, 0, 0);
-        ctx.restore();
+        const sprite = getGlyphSprite(box.char, box.width, box.height, glyphColor);
+        ctx.drawImage(sprite, box.x * 2, box.y * 2, box.width * 2, box.height * 2);
       });
       if (!isRear && kind !== "nevSmall" && kind !== "nevLarge") {
         ctx.beginPath(); ctx.arc(134 * 2, 70 * 2, 9, 0, Math.PI * 2); ctx.fill();
