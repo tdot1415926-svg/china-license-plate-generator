@@ -21,7 +21,7 @@ const PLATE_SPECS: Record<PlateKind, { width: number; height: number }> = {
 
 type GlyphBox = { char: string; x: number; y: number; width: number; height: number; row: "single" | "upper" | "lower" };
 
-// Character boxes follow the coordinate model used by the referenced MIT project.
+// Character boxes use GA 36 dimensions also demonstrated by the referenced open-source generators.
 function getGlyphBoxes(value: string, kind: PlateKind): GlyphBox[] {
   if (REAR_KINDS.includes(kind)) {
     return value.split("").map((char, index) => index < 2
@@ -148,7 +148,7 @@ export default function Home() {
     const ctx = canvas.getContext("2d")!;
     ctx.scale(scale, scale);
     const isGreen = kind === "tractor" || kind === "field" || kind === "port" || kind === "aviation";
-    const palette = kind === "blue" ? ["#075fc8", "#013f9f"] : kind === "hkmo" ? ["#17191b", "#050606"] : isGreen ? ["#138447", "#075d31"] : isTemp ? ["#f8f5e8", "#e7e7db"] : kind === "nevSmall" ? ["#eef9ef", "#57cf78"] : kind === "nevLarge" ? ["#f1d21b", "#58ca73"] : ["#f8d21b", "#e8b400"];
+    const palette = kind === "blue" ? ["#001b7a", "#001b7a"] : kind === "hkmo" ? ["#000000", "#000000"] : isGreen ? ["#138447", "#075d31"] : isTemp ? ["#f8f5e8", "#e7e7db"] : kind === "nevSmall" ? ["#eef9ef", "#57cf78"] : kind === "nevLarge" ? ["#ffbe00", "#58ca73"] : ["#ffbe00", "#ffbe00"];
     const gradient = kind === "nevLarge"
       ? ctx.createLinearGradient(0, 0, width, 0)
       : ctx.createLinearGradient(0, 0, width, height);
@@ -181,14 +181,17 @@ export default function Home() {
       ctx.globalAlpha = 1;
     }
     ctx.strokeStyle = kind === "blue" || kind === "hkmo" || isGreen ? "#f8fbff" : isTemp ? (kind === "temp" || kind === "tempEntry" ? "#174a9c" : "#9c2721") : "#101317";
-    ctx.lineWidth = isTemp ? 4 : 7;
-    ctx.roundRect(isTemp ? 8 : 12, isTemp ? 8 : 12, width - (isTemp ? 16 : 24), height - (isTemp ? 16 : 24), isTemp ? 2 : 11);
+    ctx.lineWidth = isTemp ? 4 : 6;
+    ctx.roundRect(isTemp ? 8 : 3, isTemp ? 8 : 3, width - (isTemp ? 16 : 6), height - (isTemp ? 16 : 6), isTemp ? 2 : 20);
     ctx.stroke();
     if (!isTemp && kind !== "field") {
-      [[45, 42], [width - 45, 42], [45, height - 42], [width - 45, height - 42]].forEach(([x, y]) => {
-        const hole = ctx.createRadialGradient(x, y, 1, x, y, 9);
-        hole.addColorStop(0, "#15191c"); hole.addColorStop(.34, "#15191c"); hole.addColorStop(.4, "#d8dde0"); hole.addColorStop(.75, "#899096"); hole.addColorStop(1, "rgba(0,0,0,.4)");
-        ctx.fillStyle = hole; ctx.beginPath(); ctx.arc(x, y, 9, 0, Math.PI * 2); ctx.fill();
+      const slotWidth = 46;
+      const slotHeight = 16;
+      const slotLeft = 192;
+      const slotTop = 17;
+      ctx.fillStyle = ctx.strokeStyle;
+      [[slotLeft, slotTop], [width - slotLeft - slotWidth, slotTop], [slotLeft, height - slotTop - slotHeight], [width - slotLeft - slotWidth, height - slotTop - slotHeight]].forEach(([x, y]) => {
+        ctx.beginPath(); ctx.roundRect(x, y, slotWidth, slotHeight, slotHeight / 2); ctx.fill();
       });
     }
     ctx.textAlign = "center";
@@ -309,7 +312,7 @@ export default function Home() {
       <section className="info-strip">
         <div><span className="eyebrow">编码结构</span><strong><i>省</i><i>发牌机关</i><i>序号</i></strong><p>省级简称 + 地市字母代码 + 五位或六位序号</p></div>
         <div><span className="eyebrow">生成规则</span><strong className="rule-icons"><i>I</i><i>O</i><span>自动排除易混淆字母</span></strong><p>普通序号不使用 I、O，降低机器识别与肉眼辨识歧义</p></div>
-        <div><span className="eyebrow">视觉工艺</span><strong className="material">反光膜 <i/> 压印边框 <i/> 铆钉</strong><p>用光泽、颗粒与压印阴影模拟真实号牌材质</p></div>
+        <div><span className="eyebrow">视觉工艺</span><strong className="material">反光膜 <i/> 压印边框 <i/> 长圆标记</strong><p>用标准尺寸、固定字位与轻微颗粒模拟真实号牌材质</p></div>
       </section>
       <footer><span>牌研所 · 中国机动车号牌样式生成工具</span><span>依据公开资料制作 · 非官方服务</span></footer>
       {notice && <div className="toast">✓ {notice}</div>}

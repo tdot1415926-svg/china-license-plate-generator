@@ -118,6 +118,11 @@ worker/
 [Pengfei8324/chinese_license_plate_generator](https://github.com/Pengfei8324/chinese_license_plate_generator)，
 当前项目使用网页原生绘制重新实现，没有复制其底板或防伪素材。
 
+单层号牌的 440×140 mm 底板、45×90 mm 字符单元、12 mm 字距、10 mm
+间隔点及长圆安装标记布局参考
+[longwosion/carplate](https://github.com/longwosion/carplate) 的公开实现逻辑；由于该仓库未声明素材许可，
+本项目没有复制其中的字符精灵图片，使用自有 CSS 与 Canvas 绘制重新实现。
+
 公开资料可能存在更新或地区差异，本项目不属于官方号牌核验服务。
 
 ## 技术栈
