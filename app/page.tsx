@@ -211,22 +211,29 @@ export default function Home() {
       spriteCtx.fillStyle = color;
       spriteCtx.textAlign = "center";
       spriteCtx.textBaseline = "alphabetic";
-      // Measure the real ink bounds and fit them inside a 10% safe area. Using a
-      // font size larger than the sprite used to clip tall letters and digits at
-      // the rasterization stage, so the missing strokes also appeared in export.
+      // Measure the real ink bounds before scaling so strokes cannot be clipped
+      // during rasterization in either preview or export.
       const sourceFontSize = 200;
       spriteCtx.font = `900 ${sourceFontSize}px "Arial Narrow", "Noto Sans SC", sans-serif`;
       const metrics = spriteCtx.measureText(char);
       const inkWidth = Math.max(1, metrics.actualBoundingBoxLeft + metrics.actualBoundingBoxRight);
       const inkHeight = Math.max(1, metrics.actualBoundingBoxAscent + metrics.actualBoundingBoxDescent);
-      const horizontalRatio = /[\u3400-\u9fff]/.test(char) ? .62 : .88;
-      const fit = Math.min(
-        sprite.width * .9 / (inkWidth * horizontalRatio),
-        sprite.height * .9 / inkHeight,
+      const isHan = /[\u3400-\u9fff]/.test(char);
+      // The reference sprites fill about 94–95% of their 45px-wide cell. Latin
+      // glyphs reach roughly 96% of the 90px height; Han glyphs sit near 92%.
+      // Keep vertical scale independent so a wide glyph only compresses on X
+      // instead of making the whole character visibly shorter.
+      const targetWidthRatio = isHan ? .94 : .95;
+      const targetHeightRatio = isHan ? .92 : .96;
+      const horizontalRatio = isHan ? .52 : .88;
+      const scaleY = sprite.height * targetHeightRatio / inkHeight;
+      const scaleX = Math.min(
+        horizontalRatio * scaleY,
+        sprite.width * targetWidthRatio / inkWidth,
       );
       spriteCtx.save();
       spriteCtx.translate(sprite.width / 2, sprite.height / 2);
-      spriteCtx.scale(horizontalRatio * fit, fit);
+      spriteCtx.scale(scaleX, scaleY);
       spriteCtx.fillText(
         char,
         (metrics.actualBoundingBoxLeft - metrics.actualBoundingBoxRight) / 2,

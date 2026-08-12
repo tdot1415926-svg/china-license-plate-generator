@@ -42,7 +42,9 @@ test("keeps physical dimensions and safe export rules in source", async () => {
   assert.match(page, /renderPlate\(canvas, 6\)/);
   assert.match(page, /renderPlate\(previewCanvas\.current, 2\)/);
   assert.match(page, /actualBoundingBoxAscent/);
-  assert.match(page, /sprite\.height \* \.9 \/ inkHeight/);
+  assert.match(page, /targetWidthRatio = isHan \? \.94 : \.95/);
+  assert.match(page, /targetHeightRatio = isHan \? \.92 : \.96/);
+  assert.match(page, /spriteCtx\.scale\(scaleX, scaleY\)/);
   assert.match(page, /请勿用于伪造证件或违法用途/);
   assert.match(css, /\.plate-energy \{ aspect-ratio:24\/7; \}/);
   assert.match(css, /\.plate-rear \{[^}]*aspect-ratio:2\/1/);
