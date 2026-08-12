@@ -28,6 +28,7 @@ test("server-renders the license plate generator", async () => {
   assert.match(html, /临时号牌/);
   assert.match(html, /车辆图片合成/);
   assert.match(html, /上传车辆正面图片/);
+  assert.match(html, /自动识别车牌位置和尺寸/);
   assert.doesNotMatch(html, /SAMPLE|仅供设计测试/i);
 });
 
@@ -55,6 +56,11 @@ test("keeps physical dimensions and safe export rules in source", async () => {
   assert.match(page, /spriteCtx\.scale\(scaleX, scaleY\)/);
   assert.match(page, /URL\.createObjectURL\(file\)/);
   assert.match(page, /renderVehicleComposite/);
+  assert.match(page, /detectVehiclePlate/);
+  assert.match(page, /plateColor\[pixelIndex\]/);
+  assert.match(page, /已自动识别 · 置信度/);
+  assert.match(page, /targetHeight = canvas\.height \* vehiclePlacement\.height/);
+  assert.match(page, /brightness\(\$\{vehiclePlacement\.brightness\}\)/);
   assert.match(page, /vehicleCanvas\.current\.toDataURL\("image\/png"\)/);
   assert.match(page, /onPointerMove=\{moveVehiclePlate\}/);
   assert.match(page, /请勿用于伪造证件或违法用途/);

@@ -28,9 +28,127 @@ const TEMP_LAYOUT = {
 };
 
 type GlyphBox = { char: string; x: number; y: number; width: number; height: number; row: "single" | "upper" | "lower" };
-type VehiclePlacement = { x: number; y: number; width: number; rotation: number };
+type VehiclePlacement = { x: number; y: number; width: number; height: number; rotation: number; brightness: number };
+type PlateDetection = { placement: VehiclePlacement; confidence: number };
 
-const DEFAULT_VEHICLE_PLACEMENT: VehiclePlacement = { x: .5, y: .68, width: .26, rotation: 0 };
+const DEFAULT_VEHICLE_PLACEMENT: VehiclePlacement = { x: .5, y: .68, width: .26, height: .085, rotation: 0, brightness: 1 };
+
+function detectVehiclePlate(image: HTMLImageElement): PlateDetection | null {
+  const width = Math.min(640, image.naturalWidth);
+  const height = Math.max(1, Math.round(image.naturalHeight * width / image.naturalWidth));
+  const canvas = document.createElement("canvas");
+  canvas.width = width;
+  canvas.height = height;
+  const ctx = canvas.getContext("2d", { willReadFrequently: true })!;
+  ctx.drawImage(image, 0, 0, width, height);
+  const pixels = ctx.getImageData(0, 0, width, height).data;
+  const gray = new Float32Array(width * height);
+  const plateColor = new Uint8Array(width * height);
+  const dark = new Uint8Array(width * height);
+
+  for (let index = 0; index < gray.length; index += 1) {
+    const offset = index * 4;
+    const red = pixels[offset];
+    const green = pixels[offset + 1];
+    const blue = pixels[offset + 2];
+    const brightness = (red + green + blue) / 3;
+    const saturation = Math.max(red, green, blue) - Math.min(red, green, blue);
+    const isWhite = brightness > 145 && saturation < 75;
+    const isBlue = blue > 85 && blue > red * 1.16 && blue > green * 1.05;
+    const isYellow = red > 120 && green > 85 && blue < 135 && red + green > blue * 2.15;
+    gray[index] = red * .299 + green * .587 + blue * .114;
+    plateColor[index] = isWhite || isBlue || isYellow ? 1 : 0;
+    dark[index] = brightness < 85 ? 1 : 0;
+  }
+
+  const integralWidth = width + 1;
+  const integralSize = integralWidth * (height + 1);
+  const colorIntegral = new Float64Array(integralSize);
+  const edgeIntegral = new Float64Array(integralSize);
+  const darkIntegral = new Float64Array(integralSize);
+  const grayIntegral = new Float64Array(integralSize);
+  const graySquareIntegral = new Float64Array(integralSize);
+  for (let y = 0; y < height; y += 1) {
+    let colorRow = 0;
+    let edgeRow = 0;
+    let darkRow = 0;
+    let grayRow = 0;
+    let squareRow = 0;
+    for (let x = 0; x < width; x += 1) {
+      const pixelIndex = y * width + x;
+      const value = gray[pixelIndex];
+      const horizontalEdge = x ? Math.abs(value - gray[pixelIndex - 1]) : 0;
+      const verticalEdge = y ? Math.abs(value - gray[pixelIndex - width]) : 0;
+      colorRow += plateColor[pixelIndex];
+      edgeRow += Math.min(1, (horizontalEdge + verticalEdge) / 100);
+      darkRow += dark[pixelIndex];
+      grayRow += value;
+      squareRow += value * value;
+      const integralIndex = (y + 1) * integralWidth + x + 1;
+      const above = integralIndex - integralWidth;
+      colorIntegral[integralIndex] = colorIntegral[above] + colorRow;
+      edgeIntegral[integralIndex] = edgeIntegral[above] + edgeRow;
+      darkIntegral[integralIndex] = darkIntegral[above] + darkRow;
+      grayIntegral[integralIndex] = grayIntegral[above] + grayRow;
+      graySquareIntegral[integralIndex] = graySquareIntegral[above] + squareRow;
+    }
+  }
+
+  const areaSum = (integral: Float64Array, x: number, y: number, areaWidth: number, areaHeight: number) => {
+    const left = x;
+    const right = x + areaWidth;
+    const top = y;
+    const bottom = y + areaHeight;
+    return integral[bottom * integralWidth + right]
+      - integral[top * integralWidth + right]
+      - integral[bottom * integralWidth + left]
+      + integral[top * integralWidth + left];
+  };
+
+  let best = { score: -Infinity, x: 0, y: 0, width: 0, height: 0, mean: 150 };
+  const aspects = [2.8, 3.2, 3.6, 4, 4.5, 5];
+  for (let candidateWidth = Math.round(width * .1); candidateWidth <= width * .34; candidateWidth += 8) {
+    for (const aspect of aspects) {
+      const candidateHeight = Math.max(12, Math.round(candidateWidth / aspect));
+      const step = Math.max(4, Math.floor(candidateWidth / 16));
+      const maxY = Math.round(height * .88) - candidateHeight;
+      const maxX = Math.round(width * .92) - candidateWidth;
+      for (let y = Math.round(height * .38); y <= maxY; y += step) {
+        for (let x = Math.round(width * .08); x <= maxX; x += step) {
+          const area = candidateWidth * candidateHeight;
+          const colorRatio = areaSum(colorIntegral, x, y, candidateWidth, candidateHeight) / area;
+          const edgeRatio = areaSum(edgeIntegral, x, y, candidateWidth, candidateHeight) / area;
+          const darkRatio = areaSum(darkIntegral, x, y, candidateWidth, candidateHeight) / area;
+          const mean = areaSum(grayIntegral, x, y, candidateWidth, candidateHeight) / area;
+          const variance = Math.max(0, areaSum(graySquareIntegral, x, y, candidateWidth, candidateHeight) / area - mean * mean);
+          const texture = Math.min(1, Math.sqrt(variance) / 80);
+          const centerX = (x + candidateWidth / 2) / width;
+          const centerY = (y + candidateHeight / 2) / height;
+          const positionPrior = Math.exp(-(((centerX - .5) / .28) ** 2) - (((centerY - .66) / .24) ** 2));
+          const characterMix = Math.max(0, 1 - Math.abs(darkRatio - .28) / .32);
+          const sizePrior = Math.exp(-(((candidateWidth / width - .19) / .11) ** 2));
+          const score = colorRatio * 2.5 + edgeRatio * 1.6 + texture * .55 + characterMix * .45 + positionPrior * .55 + sizePrior * .75;
+          if (score > best.score) best = { score, x, y, width: candidateWidth, height: candidateHeight, mean };
+        }
+      }
+    }
+  }
+
+  if (best.score < 2.85) return null;
+  const expandedWidth = Math.min(width * .55, best.width * 1.12);
+  const expandedHeight = Math.min(height * .22, best.height * 1.18);
+  return {
+    placement: {
+      x: Math.min(.95, Math.max(.05, (best.x + best.width / 2) / width)),
+      y: Math.min(.95, Math.max(.05, (best.y + best.height / 2) / height)),
+      width: expandedWidth / width,
+      height: expandedHeight / height,
+      rotation: 0,
+      brightness: Math.min(1.12, Math.max(.8, .78 + best.mean / 255 * .38)),
+    },
+    confidence: Math.min(.99, Math.max(.35, (best.score - 2.85) / 1.35)),
+  };
+}
 
 // Character boxes use GA 36 dimensions also demonstrated by the referenced open-source generators.
 function getGlyphBoxes(value: string, kind: PlateKind): GlyphBox[] {
@@ -117,6 +235,8 @@ export default function Home() {
   const [vehicleReady, setVehicleReady] = useState(false);
   const [vehicleName, setVehicleName] = useState("");
   const [vehiclePlacement, setVehiclePlacement] = useState<VehiclePlacement>(DEFAULT_VEHICLE_PLACEMENT);
+  const [detectedPlacement, setDetectedPlacement] = useState<VehiclePlacement>(DEFAULT_VEHICLE_PLACEMENT);
+  const [detectionStatus, setDetectionStatus] = useState("等待车辆图片");
 
   const current = useMemo(() => PLATE_TYPES.find((item) => item.id === kind)!, [kind]);
   const spec = PLATE_SPECS[kind];
@@ -354,16 +474,22 @@ export default function Home() {
     const plateCanvas = document.createElement("canvas");
     renderPlate(plateCanvas, 2);
     const targetWidth = canvas.width * vehiclePlacement.width;
-    const targetHeight = targetWidth * spec.height / spec.width;
+    const targetHeight = canvas.height * vehiclePlacement.height;
     ctx.save();
     ctx.translate(canvas.width * vehiclePlacement.x, canvas.height * vehiclePlacement.y);
     ctx.rotate(vehiclePlacement.rotation * Math.PI / 180);
+    ctx.fillStyle = "rgba(5,8,10,.42)";
+    ctx.beginPath();
+    ctx.roundRect(-targetWidth * .515, -targetHeight * .56, targetWidth * 1.03, targetHeight * 1.12, Math.max(2, targetHeight * .08));
+    ctx.fill();
     ctx.shadowColor = "rgba(0,0,0,.5)";
     ctx.shadowBlur = Math.max(2, targetHeight * .06);
     ctx.shadowOffsetY = Math.max(1, targetHeight * .035);
+    ctx.filter = `brightness(${vehiclePlacement.brightness}) contrast(.96) saturate(.94)`;
+    ctx.globalAlpha = .985;
     ctx.drawImage(plateCanvas, -targetWidth / 2, -targetHeight / 2, targetWidth, targetHeight);
     ctx.restore();
-  }, [renderPlate, spec.height, spec.width, vehiclePlacement]);
+  }, [renderPlate, vehiclePlacement]);
 
   useEffect(() => {
     if (vehicleReady) renderVehicleComposite();
@@ -372,6 +498,34 @@ export default function Home() {
   useEffect(() => () => {
     if (vehicleObjectUrl.current) URL.revokeObjectURL(vehicleObjectUrl.current);
   }, []);
+
+  const runVehicleDetection = (source = vehicleImage.current) => {
+    if (!source) {
+      toast("请先上传车辆正面图片");
+      return;
+    }
+    setDetectionStatus("正在自动识别车牌区域…");
+    requestAnimationFrame(() => {
+      const detected = detectVehiclePlate(source);
+      if (detected) {
+        setDetectedPlacement(detected.placement);
+        setVehiclePlacement(detected.placement);
+        setDetectionStatus(`已自动识别 · 置信度 ${Math.round(detected.confidence * 100)}%`);
+        toast("已识别原车牌位置并完成覆盖");
+        return;
+      }
+      const fallbackWidth = .26;
+      const fallback = {
+        ...DEFAULT_VEHICLE_PLACEMENT,
+        width: fallbackWidth,
+        height: Math.min(.18, Math.max(.04, fallbackWidth * source.naturalWidth / source.naturalHeight * spec.height / spec.width)),
+      };
+      setDetectedPlacement(fallback);
+      setVehiclePlacement(fallback);
+      setDetectionStatus("未可靠识别 · 已使用默认位置");
+      toast("未可靠识别车牌，请拖动微调");
+    });
+  };
 
   const uploadVehicle = (event: ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
@@ -388,9 +542,8 @@ export default function Home() {
       vehicleObjectUrl.current = nextUrl;
       vehicleImage.current = image;
       setVehicleName(file.name);
-      setVehiclePlacement(DEFAULT_VEHICLE_PLACEMENT);
       setVehicleReady(true);
-      toast("车辆图片已载入，可拖动车牌定位");
+      runVehicleDetection(image);
     };
     image.onerror = () => {
       URL.revokeObjectURL(nextUrl);
@@ -489,7 +642,7 @@ export default function Home() {
       <section className="vehicle-studio" id="vehicle-studio">
         <div className="vehicle-studio-heading">
           <div><span className="eyebrow">车辆图片合成</span><h2>把当前车牌安装到车辆正面图</h2></div>
-          <p>图片只在本机浏览器处理，不会上传。载入后可直接拖动车牌定位。</p>
+          <p>图片只在本机浏览器处理。载入后自动识别原车牌位置与大小并完成覆盖，也可继续拖动微调。</p>
         </div>
         <div className="vehicle-studio-grid">
           <div className={`vehicle-photo-stage ${vehicleReady ? "has-image" : ""}`}>
@@ -508,25 +661,30 @@ export default function Home() {
               <label className="vehicle-empty">
                 <span>＋</span>
                 <b>上传车辆正面图片</b>
-                <small>支持 JPG、PNG、WebP · 建议车头居中、车牌区域清晰</small>
+                <small>支持 JPG、PNG、WebP · 自动识别车牌位置和尺寸</small>
                 <input type="file" accept="image/jpeg,image/png,image/webp" onChange={uploadVehicle} />
               </label>
             )}
           </div>
           <aside className="vehicle-tools">
             <div className="vehicle-tool-head"><span>定位控制</span><small>{vehicleReady ? vehicleName : "等待车辆图片"}</small></div>
-            <label className="vehicle-upload-button">选择车辆图片<input type="file" accept="image/jpeg,image/png,image/webp" onChange={uploadVehicle} /></label>
+            <div className="vehicle-detection-status"><i className={detectionStatus.startsWith("已自动") ? "success" : ""} />{detectionStatus}</div>
+            <div className="vehicle-detection-actions">
+              <label className="vehicle-upload-button">选择车辆图片<input type="file" accept="image/jpeg,image/png,image/webp" onChange={uploadVehicle} /></label>
+              <button disabled={!vehicleReady} onClick={() => runVehicleDetection()}>重新识别</button>
+            </div>
             <div className="vehicle-range-list">
               <label><span>水平位置 <i>{Math.round(vehiclePlacement.x * 100)}%</i></span><input type="range" min="5" max="95" value={vehiclePlacement.x * 100} disabled={!vehicleReady} onChange={(event) => setPlacementValue("x", Number(event.target.value) / 100)} /></label>
               <label><span>垂直位置 <i>{Math.round(vehiclePlacement.y * 100)}%</i></span><input type="range" min="5" max="95" value={vehiclePlacement.y * 100} disabled={!vehicleReady} onChange={(event) => setPlacementValue("y", Number(event.target.value) / 100)} /></label>
               <label><span>车牌宽度 <i>{Math.round(vehiclePlacement.width * 100)}%</i></span><input type="range" min="10" max="60" value={vehiclePlacement.width * 100} disabled={!vehicleReady} onChange={(event) => setPlacementValue("width", Number(event.target.value) / 100)} /></label>
+              <label><span>车牌高度 <i>{Math.round(vehiclePlacement.height * 100)}%</i></span><input type="range" min="3" max="25" step="0.5" value={vehiclePlacement.height * 100} disabled={!vehicleReady} onChange={(event) => setPlacementValue("height", Number(event.target.value) / 100)} /></label>
               <label><span>旋转角度 <i>{vehiclePlacement.rotation.toFixed(1)}°</i></span><input type="range" min="-15" max="15" step="0.5" value={vehiclePlacement.rotation} disabled={!vehicleReady} onChange={(event) => setPlacementValue("rotation", Number(event.target.value))} /></label>
             </div>
             <div className="vehicle-tool-actions">
-              <button disabled={!vehicleReady} onClick={() => setVehiclePlacement(DEFAULT_VEHICLE_PLACEMENT)}>恢复默认</button>
+              <button disabled={!vehicleReady} onClick={() => setVehiclePlacement(detectedPlacement)}>恢复识别</button>
               <button className="vehicle-export" disabled={!vehicleReady} onClick={downloadVehicleComposite}>↓ 导出车辆图片</button>
             </div>
-            <p>提示：在图片上按住并拖动即可快速移动。切换车牌类型或号码后，车辆预览会同步更新。</p>
+            <p>自动识别会优先寻找车辆下半部的白、蓝或黄底矩形车牌，并匹配原区域尺寸与现场亮度。特殊角度可继续拖动和微调。</p>
           </aside>
         </div>
       </section>
