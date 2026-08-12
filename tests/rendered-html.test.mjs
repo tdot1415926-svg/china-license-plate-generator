@@ -39,6 +39,12 @@ test("keeps physical dimensions and safe export rules in source", async () => {
   assert.match(page, /yellowRear: \{ width: 440, height: 220 \}/);
   assert.match(page, /nevLarge: \{ width: 480, height: 140 \}/);
   assert.match(page, /temp: \{ width: 220, height: 140 \}/);
+  assert.match(page, /titleY: 45/);
+  assert.match(page, /numberY: 132/);
+  assert.match(page, /expiryY: 211/);
+  assert.match(page, /noteY: 249/);
+  assert.match(page, /drawFittedText\(formatPlate\(plate\), TEMP_LAYOUT\.numberY/);
+  assert.doesNotMatch(page, /fillText\(`有效期至[^\n]+330\)/);
   assert.match(page, /renderPlate\(canvas, 6\)/);
   assert.match(page, /renderPlate\(previewCanvas\.current, 2\)/);
   assert.match(page, /actualBoundingBoxAscent/);

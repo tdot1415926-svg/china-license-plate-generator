@@ -19,6 +19,14 @@ const PLATE_SPECS: Record<PlateKind, { width: number; height: number }> = {
   temp: { width: 220, height: 140 }, tempTrial: { width: 220, height: 140 }, tempOversize: { width: 220, height: 140 }, tempEntry: { width: 220, height: 140 },
 };
 
+const TEMP_LAYOUT = {
+  titleY: 45,
+  numberY: 132,
+  expiryY: 211,
+  noteY: 249,
+  horizontalPadding: 24,
+};
+
 type GlyphBox = { char: string; x: number; y: number; width: number; height: number; row: "single" | "upper" | "lower" };
 
 // Character boxes use GA 36 dimensions also demonstrated by the referenced open-source generators.
@@ -271,14 +279,36 @@ export default function Home() {
     if (isTemp) {
       ctx.fillStyle = ctx.strokeStyle;
       ctx.shadowColor = "transparent";
-      ctx.font = '700 30px "Noto Sans SC", sans-serif';
-      ctx.fillText(kind === "tempEntry" ? "临时入境机动车号牌" : "机动车临时行驶车号牌", width / 2, 55);
-      ctx.font = `900 ${kind === "tempEntry" ? 72 : 105}px "Arial Narrow", "Noto Sans SC", sans-serif`;
-      ctx.fillText(formatPlate(plate, kind), width / 2, 205);
-      ctx.font = '600 22px "Noto Sans SC", sans-serif';
-      ctx.fillText(`有效期至  ${expiryDate}`, width / 2, 330);
-      ctx.font = '500 16px "Noto Sans SC", sans-serif';
-      ctx.fillText(kind === "tempEntry" ? "核准路线：登记区域内道路" : "请粘贴于前风窗玻璃内侧", width / 2, 375);
+      const drawFittedText = (text: string, y: number, maxFontSize: number, minFontSize: number, weight: number, family: string) => {
+        ctx.font = `${weight} ${maxFontSize}px ${family}`;
+        const measuredWidth = Math.max(1, ctx.measureText(text).width);
+        const availableWidth = width - TEMP_LAYOUT.horizontalPadding * 2;
+        const fittedSize = Math.max(minFontSize, Math.min(maxFontSize, maxFontSize * availableWidth / measuredWidth));
+        ctx.font = `${weight} ${fittedSize}px ${family}`;
+        ctx.fillText(text, width / 2, y, availableWidth);
+      };
+      const sans = '"Noto Sans SC", sans-serif';
+      const plateFont = '"Arial Narrow", "Noto Sans SC", sans-serif';
+      drawFittedText(
+        kind === "tempEntry" ? "临时入境机动车号牌" : "机动车临时行驶车号牌",
+        TEMP_LAYOUT.titleY,
+        28,
+        22,
+        700,
+        sans,
+      );
+      // The title already identifies an entry plate; repeating "临时入境" in
+      // the number line previously pushed both sides beyond the paper canvas.
+      drawFittedText(formatPlate(plate), TEMP_LAYOUT.numberY, 82, 58, 900, plateFont);
+      drawFittedText(`有效期至  ${expiryDate}`, TEMP_LAYOUT.expiryY, 20, 16, 600, sans);
+      drawFittedText(
+        kind === "tempEntry" ? "核准路线：登记区域内道路" : "请粘贴于前风窗玻璃内侧",
+        TEMP_LAYOUT.noteY,
+        16,
+        13,
+        500,
+        sans,
+      );
     } else if (GLYPH_KINDS.includes(kind)) {
       drawGlyphs();
     } else if (kind === "field") {
