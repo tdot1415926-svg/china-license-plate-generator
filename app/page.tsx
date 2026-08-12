@@ -5,16 +5,48 @@ import { useMemo, useRef, useState } from "react";
 const PROVINCES = ["京", "津", "沪", "渝", "冀", "豫", "云", "辽", "黑", "湘", "皖", "鲁", "新", "苏", "浙", "赣", "鄂", "桂", "甘", "晋", "蒙", "陕", "吉", "闽", "贵", "粤", "青", "藏", "川", "宁", "琼"];
 const LETTERS = "ABCDEFGHJKLMNPQRSTUVWXYZ";
 const SERIAL = "0123456789ABCDEFGHJKLMNPQRSTUVWXYZ";
+const TEMP_KINDS: PlateKind[] = ["temp", "tempTrial", "tempOversize", "tempEntry"];
+const REAR_KINDS: PlateKind[] = ["yellowRear", "trailer"];
+const GLYPH_KINDS: PlateKind[] = ["blue", "yellow", "yellowRear", "nevSmall", "nevLarge", "coach", "trailer", "hkmo"];
 
-type PlateKind = "blue" | "yellow" | "nevSmall" | "nevLarge" | "coach" | "trailer" | "hkmo" | "tractor" | "field" | "port" | "aviation" | "temp" | "tempTrial" | "tempOversize" | "tempEntry";
+type PlateKind = "blue" | "yellow" | "yellowRear" | "nevSmall" | "nevLarge" | "coach" | "trailer" | "hkmo" | "tractor" | "field" | "port" | "aviation" | "temp" | "tempTrial" | "tempOversize" | "tempEntry";
+
+const PLATE_SPECS: Record<PlateKind, { width: number; height: number }> = {
+  blue: { width: 440, height: 140 }, yellow: { width: 440, height: 140 }, yellowRear: { width: 440, height: 220 },
+  nevSmall: { width: 480, height: 140 }, nevLarge: { width: 480, height: 140 }, coach: { width: 440, height: 140 },
+  trailer: { width: 440, height: 220 }, hkmo: { width: 440, height: 140 }, tractor: { width: 440, height: 140 },
+  field: { width: 440, height: 140 }, port: { width: 440, height: 140 }, aviation: { width: 440, height: 140 },
+  temp: { width: 220, height: 140 }, tempTrial: { width: 220, height: 140 }, tempOversize: { width: 220, height: 140 }, tempEntry: { width: 220, height: 140 },
+};
+
+type GlyphBox = { char: string; x: number; y: number; width: number; height: number; row: "single" | "upper" | "lower" };
+
+// Character boxes follow the coordinate model used by the referenced MIT project.
+function getGlyphBoxes(value: string, kind: PlateKind): GlyphBox[] {
+  if (REAR_KINDS.includes(kind)) {
+    return value.split("").map((char, index) => index < 2
+      ? { char, x: index === 0 ? 110 : 250, y: 15, width: 80, height: 60, row: "upper" }
+      : { char, x: 27 + (index - 2) * 80, y: 90, width: 65, height: 110, row: "lower" });
+  }
+
+  const energy = kind === "nevSmall" || kind === "nevLarge";
+  let right = 0;
+  return value.split("").map((char, index) => {
+    const width = energy && index > 0 ? 43 : 45;
+    const x = index === 0 ? 15 : right + (index === 2 ? (energy ? 34 : 34) : energy ? 9 : 12);
+    right = x + width;
+    return { char, x, y: 25, width, height: 90, row: "single" };
+  });
+}
 
 const PLATE_TYPES: { id: PlateKind; name: string; note: string; sample: string }[] = [
   { id: "blue", name: "小型汽车", note: "蓝底白字 · 7 位", sample: "京A·A2088" },
-  { id: "yellow", name: "大型汽车", note: "黄底黑字 · 7 位", sample: "沪B·58216" },
+  { id: "yellow", name: "大型汽车前牌", note: "黄底黑字 · 440×140", sample: "沪B·58216" },
+  { id: "yellowRear", name: "大型汽车后牌", note: "双行黄牌 · 440×220", sample: "沪B 58216" },
   { id: "nevSmall", name: "小型新能源", note: "渐变绿底 · 8 位", sample: "粤B·D12345" },
   { id: "nevLarge", name: "大型新能源", note: "黄绿双拼 · 8 位", sample: "川A·12345F" },
   { id: "coach", name: "教练汽车", note: "黄底黑字 · 末位学", sample: "浙C·2314学" },
-  { id: "trailer", name: "挂车", note: "黄底黑字 · 末位挂", sample: "鲁Q·7253挂" },
+  { id: "trailer", name: "挂车", note: "双行黄牌 · 440×220", sample: "鲁Q 7253挂" },
   { id: "hkmo", name: "港澳入出境", note: "黑底白字 · 末位港/澳", sample: "粤Z·A88港" },
   { id: "tractor", name: "拖拉机", note: "绿底白字 · 农用机械", sample: "京01-00001" },
   { id: "field", name: "厂（场）内车辆", note: "绿底白字 · 场内专用", sample: "场内京A·00001" },
@@ -36,20 +68,21 @@ function randomSerial(length: number) {
 
 function generate(kind: PlateKind, province?: string, city?: string) {
   const p = kind === "hkmo" ? "粤" : province || randomFrom(PROVINCES);
-  const c = kind === "hkmo" ? "Z" : city || randomFrom(LETTERS);
+  const c = kind === "hkmo" ? "Z" : kind === "tractor" ? city || String(Math.floor(1 + Math.random() * 99)).padStart(2, "0") : city || randomFrom(LETTERS);
   if (kind === "nevSmall") return `${p}${c}${randomFrom("DABCEF")}${randomSerial(5)}`;
   if (kind === "nevLarge") return `${p}${c}${randomSerial(5)}${randomFrom("DF")}`;
   if (kind === "coach") return `${p}${c}${randomSerial(4)}学`;
   if (kind === "trailer") return `${p}${c}${randomSerial(4)}挂`;
-  if (kind === "hkmo") return `${p}${c}${randomFrom(LETTERS)}${Math.floor(10 + Math.random() * 90)}${randomFrom("港澳")}`;
+  if (kind === "hkmo") return `${p}${c}${randomFrom(LETTERS)}${Math.floor(100 + Math.random() * 900)}${randomFrom("港澳")}`;
   if (kind === "port") return `${p}${c}${randomSerial(4)}`;
   if (kind === "tempTrial") return `${p}${c}${randomSerial(4)}试`;
   if (kind === "tempOversize") return `${p}${c}${randomSerial(4)}超`;
+  if (kind === "tractor") return `${p}${c}${Array.from({ length: 5 }, () => randomFrom("0123456789")).join("")}`;
   return `${p}${c}${randomSerial(5)}`;
 }
 
 function formatPlate(value: string, kind: PlateKind = "blue") {
-  if (kind === "tractor") return `${value.slice(0, 2)}-${value.slice(2)}`;
+  if (kind === "tractor") return `${value.slice(0, 3)}-${value.slice(3)}`;
   if (kind === "field") return `场内${value.slice(0, 2)}·${value.slice(2)}`;
   if (kind === "port") return `连港·${value.slice(1)}`;
   if (kind === "aviation") return `民航${value.slice(1, 2)}·${value.slice(2)}`;
@@ -63,11 +96,15 @@ export default function Home() {
   const [city, setCity] = useState("A");
   const [plate, setPlate] = useState("京AA2088");
   const [notice, setNotice] = useState("");
+  const [expiryDate] = useState(() => new Date(Date.now() + 30 * 86400000).toISOString().slice(0, 10));
   const noticeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const current = useMemo(() => PLATE_TYPES.find((item) => item.id === kind)!, [kind]);
+  const spec = PLATE_SPECS[kind];
+  const glyphBoxes = useMemo(() => getGlyphBoxes(plate, kind), [plate, kind]);
   const serialLength = kind === "nevSmall" || kind === "nevLarge" ? 6 : kind === "port" ? 4 : 5;
-  const serial = plate.slice(2);
+  const prefixLength = kind === "tractor" ? 3 : 2;
+  const serial = plate.slice(prefixLength);
 
   const toast = (message: string) => {
     setNotice(message);
@@ -77,7 +114,7 @@ export default function Home() {
 
   const chooseKind = (next: PlateKind) => {
     const p = next === "hkmo" ? "粤" : province;
-    const c = next === "hkmo" ? "Z" : city;
+    const c = next === "hkmo" ? "Z" : next === "tractor" ? "01" : city.length === 1 ? city : "A";
     setKind(next);
     setProvince(p);
     setCity(c);
@@ -93,23 +130,25 @@ export default function Home() {
   const randomize = () => {
     const next = generate(kind);
     setProvince(next[0]);
-    setCity(next[1]);
+    setCity(kind === "tractor" ? next.slice(1, 3) : next[1]);
     setPlate(next);
     toast("已生成一组新号码");
   };
 
   const download = () => {
-    const scale = 3;
-    const width = 880;
-    const height = kind === "hkmo" ? 280 : 280;
+    // Logical artwork uses 2 px/mm; 6× export yields about 305 dpi at physical size.
+    const scale = 6;
+    const isTemp = TEMP_KINDS.includes(kind);
+    const isRear = REAR_KINDS.includes(kind);
+    const width = spec.width * 2;
+    const height = spec.height * 2;
     const canvas = document.createElement("canvas");
     canvas.width = width * scale;
     canvas.height = height * scale;
     const ctx = canvas.getContext("2d")!;
     ctx.scale(scale, scale);
     const isGreen = kind === "tractor" || kind === "field" || kind === "port" || kind === "aviation";
-    const isTemp = kind.startsWith("temp");
-    const palette = kind === "blue" ? ["#0964d8", "#023c9c"] : kind === "hkmo" ? ["#17191b", "#050606"] : isGreen ? ["#15904d", "#075d31"] : isTemp ? ["#f8f5e8", "#e7e7db"] : kind === "nevSmall" ? ["#eaffed", "#63d986"] : kind === "nevLarge" ? ["#f4df25", "#63cf78"] : ["#ffd91f", "#e7a900"];
+    const palette = kind === "blue" ? ["#075fc8", "#013f9f"] : kind === "hkmo" ? ["#17191b", "#050606"] : isGreen ? ["#138447", "#075d31"] : isTemp ? ["#f8f5e8", "#e7e7db"] : kind === "nevSmall" ? ["#eef9ef", "#57cf78"] : kind === "nevLarge" ? ["#f1d21b", "#58ca73"] : ["#f8d21b", "#e8b400"];
     const gradient = kind === "nevLarge"
       ? ctx.createLinearGradient(0, 0, width, 0)
       : ctx.createLinearGradient(0, 0, width, height);
@@ -120,23 +159,82 @@ export default function Home() {
     }
     gradient.addColorStop(1, palette[1]);
     ctx.fillStyle = gradient;
-    ctx.roundRect(2, 2, width - 4, height - 4, 22);
+    ctx.roundRect(2, 2, width - 4, height - 4, isTemp ? 4 : 20);
     ctx.fill();
+    if (!isTemp) {
+      ctx.globalAlpha = .1;
+      ctx.fillStyle = kind === "hkmo" ? "#ffffff" : "#eef8ef";
+      for (let y = 10; y < height; y += 10) {
+        for (let x = 10; x < width; x += 10) {
+          ctx.beginPath(); ctx.arc(x, y, .8, 0, Math.PI * 2); ctx.fill();
+        }
+      }
+      ctx.globalAlpha = 1;
+    }
+    if (isTemp) {
+      ctx.globalAlpha = .1;
+      ctx.strokeStyle = kind === "temp" || kind === "tempEntry" ? "#1c57a4" : "#9c2721";
+      ctx.lineWidth = 1;
+      for (let x = -height; x < width; x += 22) {
+        ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x + height, height); ctx.stroke();
+      }
+      ctx.globalAlpha = 1;
+    }
     ctx.strokeStyle = kind === "blue" || kind === "hkmo" || isGreen ? "#f8fbff" : isTemp ? (kind === "temp" || kind === "tempEntry" ? "#174a9c" : "#9c2721") : "#101317";
-    ctx.lineWidth = 9;
-    ctx.roundRect(14, 14, width - 28, height - 28, 15);
+    ctx.lineWidth = isTemp ? 4 : 7;
+    ctx.roundRect(isTemp ? 8 : 12, isTemp ? 8 : 12, width - (isTemp ? 16 : 24), height - (isTemp ? 16 : 24), isTemp ? 2 : 11);
     ctx.stroke();
-    ctx.fillStyle = ctx.strokeStyle;
-    [[55, 52], [825, 52], [55, 228], [825, 228]].forEach(([x, y]) => {
-      ctx.beginPath(); ctx.arc(x, y, 13, 0, Math.PI * 2); ctx.fill();
-    });
+    if (!isTemp && kind !== "field") {
+      [[45, 42], [width - 45, 42], [45, height - 42], [width - 45, height - 42]].forEach(([x, y]) => {
+        const hole = ctx.createRadialGradient(x, y, 1, x, y, 9);
+        hole.addColorStop(0, "#15191c"); hole.addColorStop(.34, "#15191c"); hole.addColorStop(.4, "#d8dde0"); hole.addColorStop(.75, "#899096"); hole.addColorStop(1, "rgba(0,0,0,.4)");
+        ctx.fillStyle = hole; ctx.beginPath(); ctx.arc(x, y, 9, 0, Math.PI * 2); ctx.fill();
+      });
+    }
     ctx.textAlign = "center";
     ctx.textBaseline = "middle";
-    ctx.font = `900 ${kind === "tempEntry" ? 82 : kind.startsWith("nev") ? 125 : 138}px "Arial Narrow", "Noto Sans SC", sans-serif`;
+    ctx.fillStyle = ctx.strokeStyle;
+    ctx.font = `900 ${kind === "tempEntry" ? 72 : isTemp ? 105 : kind.startsWith("nev") ? 125 : 138}px "Arial Narrow", "Noto Sans SC", sans-serif`;
     ctx.shadowColor = "rgba(0,0,0,.28)";
     ctx.shadowBlur = 2;
     ctx.shadowOffsetY = 3;
-    if (kind === "field") {
+    const drawGlyphs = () => {
+      ctx.fillStyle = kind === "blue" || kind === "hkmo" ? "#f8fbff" : "#101214";
+      glyphBoxes.forEach((box) => {
+        const centerX = (box.x + box.width / 2) * 2;
+        const centerY = (box.y + box.height / 2) * 2;
+        ctx.save();
+        ctx.translate(centerX, centerY);
+        ctx.scale(/[\u3400-\u9fff]/.test(box.char) ? .5 : .88, 1);
+        ctx.font = `900 ${box.height * 2 * 1.06}px "Arial Narrow", "Noto Sans SC", sans-serif`;
+        ctx.fillText(box.char, 0, 0);
+        ctx.restore();
+      });
+      if (!isRear && kind !== "nevSmall" && kind !== "nevLarge") {
+        ctx.beginPath(); ctx.arc(134 * 2, 70 * 2, 9, 0, Math.PI * 2); ctx.fill();
+      }
+      if (kind === "nevSmall" || kind === "nevLarge") {
+        const mark = ctx.createLinearGradient(246, 112, 282, 168);
+        mark.addColorStop(0, "#29a9df"); mark.addColorStop(1, "#65bb55");
+        ctx.fillStyle = mark; ctx.beginPath(); ctx.ellipse(264, 140, 18, 27, 0, 0, Math.PI * 2); ctx.fill();
+        ctx.strokeStyle = "#fff"; ctx.lineWidth = 3;
+        [-8, 0, 8].forEach((dy) => { ctx.beginPath(); ctx.moveTo(254, 140 + dy); ctx.lineTo(274, 140 + dy); ctx.stroke(); });
+      }
+    };
+    if (isTemp) {
+      ctx.fillStyle = ctx.strokeStyle;
+      ctx.shadowColor = "transparent";
+      ctx.font = '700 30px "Noto Sans SC", sans-serif';
+      ctx.fillText(kind === "tempEntry" ? "临时入境机动车号牌" : "机动车临时行驶车号牌", width / 2, 55);
+      ctx.font = `900 ${kind === "tempEntry" ? 72 : 105}px "Arial Narrow", "Noto Sans SC", sans-serif`;
+      ctx.fillText(formatPlate(plate, kind), width / 2, 205);
+      ctx.font = '600 22px "Noto Sans SC", sans-serif';
+      ctx.fillText(`有效期至  ${expiryDate}`, width / 2, 330);
+      ctx.font = '500 16px "Noto Sans SC", sans-serif';
+      ctx.fillText(kind === "tempEntry" ? "核准路线：登记区域内道路" : "请粘贴于前风窗玻璃内侧", width / 2, 375);
+    } else if (GLYPH_KINDS.includes(kind)) {
+      drawGlyphs();
+    } else if (kind === "field") {
       ctx.fillStyle = "#ffe51f";
       ctx.font = '900 58px "Noto Sans SC", sans-serif';
       ctx.fillText("场", 72, 106);
@@ -159,16 +257,24 @@ export default function Home() {
     <main>
       <nav className="topbar">
         <a className="brand" href="#top" aria-label="牌研所首页"><span className="brand-mark">牌</span><span>牌研所<small>PLATE LAB</small></span></a>
-        <div className="nav-right"><span className="status"><i /> 规则库 GA 36—2018</span><a href="https://zh.wikipedia.org/wiki/中华人民共和国机动车号牌" target="_blank" rel="noreferrer">参考文档 ↗</a></div>
+        <div className="nav-right"><span className="status"><i /> 规则库 GA 36—2018</span><a href="https://baike.baidu.com/item/中华人民共和国机动车号牌/65692407" target="_blank" rel="noreferrer">参考文档 ↗</a></div>
       </nav>
 
       <section className="workspace" id="top">
         <div className="stage">
-          <div className="stage-heading"><span>实时预览</span><span className="scale">440 × 140 mm · 1:2</span></div>
+          <div className="stage-heading"><span>实时预览</span><span className="scale">{spec.width} × {spec.height} mm · 标准比例</span></div>
           <div className="plate-rig">
-            <div className={`plate plate-${kind}`} aria-label={`车牌预览 ${formatPlate(plate, kind)}`}>
+            <div className={`plate plate-${kind} ${TEMP_KINDS.includes(kind) ? "plate-paper" : ""} ${kind.startsWith("nev") ? "plate-energy" : ""} ${REAR_KINDS.includes(kind) ? "plate-rear" : ""}`} aria-label={`车牌预览 ${formatPlate(plate, kind)}`}>
               <span className="bolt b1"/><span className="bolt b2"/><span className="bolt b3"/><span className="bolt b4"/>
-              {kind === "field" ? (
+              {TEMP_KINDS.includes(kind) ? (
+                <div className="paper-content"><b>{kind === "tempEntry" ? "临时入境机动车号牌" : "机动车临时行驶车号牌"}</b><div className="plate-number">{formatPlate(plate, kind)}</div><span>有效期至 {expiryDate}</span><small>{kind === "tempEntry" ? "核准路线：登记区域内道路" : "请粘贴于前风窗玻璃内侧"}</small></div>
+              ) : GLYPH_KINDS.includes(kind) ? (
+                <div className={`glyph-board ${REAR_KINDS.includes(kind) ? "glyph-board-rear" : ""}`} aria-hidden="true">
+                  {glyphBoxes.map((box, index) => <span key={`${box.char}-${index}`} className={`glyph glyph-${box.row} ${/[\u3400-\u9fff]/.test(box.char) ? "glyph-han" : ""}`} style={{ left: `${box.x / spec.width * 100}%`, top: `${box.y / spec.height * 100}%`, width: `${box.width / spec.width * 100}%`, height: `${box.height / spec.height * 100}%` }}>{box.char}</span>)}
+                  {!REAR_KINDS.includes(kind) && !kind.startsWith("nev") && <i className="plate-separator" />}
+                  {kind.startsWith("nev") && <i className="energy-mark glyph-energy-mark" />}
+                </div>
+              ) : kind === "field" ? (
                 <div className="plate-number field-number"><span className="field-tag">场<br/>内</span><span>{plate.slice(0, 2)}·{plate.slice(2)}</span></div>
               ) : (
                 <div className="plate-number"><span>{formatPlate(plate, kind)}</span></div>
@@ -191,7 +297,7 @@ export default function Home() {
             <div className="section-row"><span className="section-label">指定生成</span><button className="dice" onClick={randomize}>⌁ 随机填充</button></div>
             <div className="fields">
               <label><span>省份</span><select value={province} disabled={kind === "hkmo"} onChange={(e) => updateParts(e.target.value, city)}>{PROVINCES.map((p) => <option key={p}>{p}</option>)}</select></label>
-              <label><span>城市代码</span><select value={city} disabled={kind === "hkmo"} onChange={(e) => updateParts(province, e.target.value)}>{[...LETTERS].map((l) => <option key={l}>{l}</option>)}</select></label>
+              <label><span>{kind === "tractor" ? "县市代码" : "城市代码"}</span><select value={city} disabled={kind === "hkmo"} onChange={(e) => updateParts(province, e.target.value)}>{kind === "tractor" ? Array.from({ length: 99 }, (_, i) => String(i + 1).padStart(2, "0")).map((l) => <option key={l}>{l}</option>) : [...LETTERS].map((l) => <option key={l}>{l}</option>)}</select></label>
               <label className="serial-field"><span>号码段</span><input value={serial} maxLength={serialLength} onChange={(e) => updateParts(province, city, e.target.value.toUpperCase().replace(/[^A-Z0-9学挂港澳试超]/g, ""))}/><small>{serial.length}/{serialLength}</small></label>
             </div>
           </section>
