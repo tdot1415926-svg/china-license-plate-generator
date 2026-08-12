@@ -210,12 +210,28 @@ export default function Home() {
       const spriteCtx = sprite.getContext("2d", { willReadFrequently: true })!;
       spriteCtx.fillStyle = color;
       spriteCtx.textAlign = "center";
-      spriteCtx.textBaseline = "middle";
-      spriteCtx.font = `900 ${boxHeight * 2 * 1.06}px "Arial Narrow", "Noto Sans SC", sans-serif`;
+      spriteCtx.textBaseline = "alphabetic";
+      // Measure the real ink bounds and fit them inside a 10% safe area. Using a
+      // font size larger than the sprite used to clip tall letters and digits at
+      // the rasterization stage, so the missing strokes also appeared in export.
+      const sourceFontSize = 200;
+      spriteCtx.font = `900 ${sourceFontSize}px "Arial Narrow", "Noto Sans SC", sans-serif`;
+      const metrics = spriteCtx.measureText(char);
+      const inkWidth = Math.max(1, metrics.actualBoundingBoxLeft + metrics.actualBoundingBoxRight);
+      const inkHeight = Math.max(1, metrics.actualBoundingBoxAscent + metrics.actualBoundingBoxDescent);
+      const horizontalRatio = /[\u3400-\u9fff]/.test(char) ? .62 : .88;
+      const fit = Math.min(
+        sprite.width * .9 / (inkWidth * horizontalRatio),
+        sprite.height * .9 / inkHeight,
+      );
       spriteCtx.save();
       spriteCtx.translate(sprite.width / 2, sprite.height / 2);
-      spriteCtx.scale(/[\u3400-\u9fff]/.test(char) ? .5 : .88, 1);
-      spriteCtx.fillText(char, 0, 0);
+      spriteCtx.scale(horizontalRatio * fit, fit);
+      spriteCtx.fillText(
+        char,
+        (metrics.actualBoundingBoxLeft - metrics.actualBoundingBoxRight) / 2,
+        (metrics.actualBoundingBoxAscent - metrics.actualBoundingBoxDescent) / 2,
+      );
       spriteCtx.restore();
       // Convert anti-aliased browser text to a stable, sprite-like binary mask.
       const pixels = spriteCtx.getImageData(0, 0, sprite.width, sprite.height);

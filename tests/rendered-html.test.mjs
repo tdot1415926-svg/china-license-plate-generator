@@ -41,6 +41,8 @@ test("keeps physical dimensions and safe export rules in source", async () => {
   assert.match(page, /temp: \{ width: 220, height: 140 \}/);
   assert.match(page, /renderPlate\(canvas, 6\)/);
   assert.match(page, /renderPlate\(previewCanvas\.current, 2\)/);
+  assert.match(page, /actualBoundingBoxAscent/);
+  assert.match(page, /sprite\.height \* \.9 \/ inkHeight/);
   assert.match(page, /请勿用于伪造证件或违法用途/);
   assert.match(css, /\.plate-energy \{ aspect-ratio:24\/7; \}/);
   assert.match(css, /\.plate-rear \{[^}]*aspect-ratio:2\/1/);
