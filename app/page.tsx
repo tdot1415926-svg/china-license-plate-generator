@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 const PROVINCES = ["京", "津", "沪", "渝", "冀", "豫", "云", "辽", "黑", "湘", "皖", "鲁", "新", "苏", "浙", "赣", "鄂", "桂", "甘", "晋", "蒙", "陕", "吉", "闽", "贵", "粤", "青", "藏", "川", "宁", "琼"];
 const LETTERS = "ABCDEFGHJKLMNPQRSTUVWXYZ";
@@ -98,6 +98,7 @@ export default function Home() {
   const [notice, setNotice] = useState("");
   const [expiryDate] = useState(() => new Date(Date.now() + 30 * 86400000).toISOString().slice(0, 10));
   const noticeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const previewCanvas = useRef<HTMLCanvasElement>(null);
 
   const current = useMemo(() => PLATE_TYPES.find((item) => item.id === kind)!, [kind]);
   const spec = PLATE_SPECS[kind];
@@ -135,14 +136,11 @@ export default function Home() {
     toast("已生成一组新号码");
   };
 
-  const download = () => {
-    // Logical artwork uses 2 px/mm; 6× export yields about 305 dpi at physical size.
-    const scale = 6;
+  const renderPlate = useCallback((canvas: HTMLCanvasElement, scale: number) => {
     const isTemp = TEMP_KINDS.includes(kind);
     const isRear = REAR_KINDS.includes(kind);
     const width = spec.width * 2;
     const height = spec.height * 2;
-    const canvas = document.createElement("canvas");
     canvas.width = width * scale;
     canvas.height = height * scale;
     const ctx = canvas.getContext("2d")!;
@@ -272,6 +270,16 @@ export default function Home() {
       ctx.fillText(formatPlate(plate, kind), width / 2, height / 2 + 5);
     }
     ctx.shadowColor = "transparent";
+  }, [expiryDate, glyphBoxes, kind, plate, spec.height, spec.width]);
+
+  useEffect(() => {
+    if (previewCanvas.current) renderPlate(previewCanvas.current, 2);
+  }, [renderPlate]);
+
+  const download = () => {
+    const canvas = document.createElement("canvas");
+    // Logical artwork uses 2 px/mm; 6× export yields about 305 dpi at physical size.
+    renderPlate(canvas, 6);
     const link = document.createElement("a");
     link.download = `plate-${plate}.png`;
     link.href = canvas.toDataURL("image/png");
@@ -290,22 +298,7 @@ export default function Home() {
         <div className="stage">
           <div className="stage-heading"><span>实时预览</span><span className="scale">{spec.width} × {spec.height} mm · 标准比例</span></div>
           <div className="plate-rig">
-            <div className={`plate plate-${kind} ${TEMP_KINDS.includes(kind) ? "plate-paper" : ""} ${kind.startsWith("nev") ? "plate-energy" : ""} ${REAR_KINDS.includes(kind) ? "plate-rear" : ""}`} aria-label={`车牌预览 ${formatPlate(plate, kind)}`}>
-              <span className="bolt b1"/><span className="bolt b2"/><span className="bolt b3"/><span className="bolt b4"/>
-              {TEMP_KINDS.includes(kind) ? (
-                <div className="paper-content"><b>{kind === "tempEntry" ? "临时入境机动车号牌" : "机动车临时行驶车号牌"}</b><div className="plate-number">{formatPlate(plate, kind)}</div><span>有效期至 {expiryDate}</span><small>{kind === "tempEntry" ? "核准路线：登记区域内道路" : "请粘贴于前风窗玻璃内侧"}</small></div>
-              ) : GLYPH_KINDS.includes(kind) ? (
-                <div className={`glyph-board ${REAR_KINDS.includes(kind) ? "glyph-board-rear" : ""}`} aria-hidden="true">
-                  {glyphBoxes.map((box, index) => <span key={`${box.char}-${index}`} className={`glyph glyph-${box.row} ${/[\u3400-\u9fff]/.test(box.char) ? "glyph-han" : ""}`} style={{ left: `${box.x / spec.width * 100}%`, top: `${box.y / spec.height * 100}%`, width: `${box.width / spec.width * 100}%`, height: `${box.height / spec.height * 100}%` }}>{box.char}</span>)}
-                  {!REAR_KINDS.includes(kind) && !kind.startsWith("nev") && <i className="plate-separator" />}
-                  {kind.startsWith("nev") && <i className="energy-mark glyph-energy-mark" />}
-                </div>
-              ) : kind === "field" ? (
-                <div className="plate-number field-number"><span className="field-tag">场<br/>内</span><span>{plate.slice(0, 2)}·{plate.slice(2)}</span></div>
-              ) : (
-                <div className="plate-number"><span>{formatPlate(plate, kind)}</span></div>
-              )}
-            </div>
+            <canvas ref={previewCanvas} className={`plate-preview ${TEMP_KINDS.includes(kind) ? "plate-preview-paper" : ""} ${kind.startsWith("nev") ? "plate-preview-energy" : ""} ${REAR_KINDS.includes(kind) ? "plate-preview-rear" : ""}`} aria-label={`车牌预览 ${formatPlate(plate, kind)}`} role="img" />
             <div className="bench-line" />
           </div>
           <div className="plate-meta"><div><b>{current.name}</b><span>{current.note}</span></div><div className="compliance"><i>✓</i><span>格式检查通过<small>字符数与类型匹配</small></span></div></div>
