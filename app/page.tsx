@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent, type PointerEvent as ReactPointerEvent } from "react";
+import { detectPlateWithYuNet, type PlateCorners, type PlateDetection, type VehiclePlacement } from "./plate-detector";
 
 const PROVINCES = ["京", "津", "沪", "渝", "冀", "豫", "云", "辽", "黑", "湘", "皖", "鲁", "新", "苏", "浙", "赣", "鄂", "桂", "甘", "晋", "蒙", "陕", "吉", "闽", "贵", "粤", "青", "藏", "川", "宁", "琼"];
 const LETTERS = "ABCDEFGHJKLMNPQRSTUVWXYZ";
@@ -28,10 +29,22 @@ const TEMP_LAYOUT = {
 };
 
 type GlyphBox = { char: string; x: number; y: number; width: number; height: number; row: "single" | "upper" | "lower" };
-type VehiclePlacement = { x: number; y: number; width: number; height: number; rotation: number; brightness: number };
-type PlateDetection = { placement: VehiclePlacement; confidence: number };
-
+type MotionDirection = "leftToRight" | "rightToLeft" | "topToBottom" | "bottomToTop";
+type MotionResolutionId = "480p" | "720p" | "1080p" | "custom";
 const DEFAULT_VEHICLE_PLACEMENT: VehiclePlacement = { x: .5, y: .68, width: .26, height: .085, rotation: 0, brightness: 1 };
+
+const MOTION_DIRECTIONS: { id: MotionDirection; name: string; arrow: string }[] = [
+  { id: "leftToRight", name: "左到右", arrow: "→" },
+  { id: "rightToLeft", name: "右到左", arrow: "←" },
+  { id: "topToBottom", name: "上到下", arrow: "↓" },
+  { id: "bottomToTop", name: "下到上", arrow: "↑" },
+];
+
+const MOTION_RESOLUTIONS: { id: Exclude<MotionResolutionId, "custom">; name: string; width: number; height: number }[] = [
+  { id: "480p", name: "480p · 854×480", width: 854, height: 480 },
+  { id: "720p", name: "720p · 1280×720", width: 1280, height: 720 },
+  { id: "1080p", name: "1080p · 1920×1080", width: 1920, height: 1080 },
+];
 
 function detectVehiclePlate(image: HTMLImageElement): PlateDetection | null {
   const width = Math.min(640, image.naturalWidth);
@@ -150,6 +163,96 @@ function detectVehiclePlate(image: HTMLImageElement): PlateDetection | null {
   };
 }
 
+type CanvasPoint = { x: number; y: number };
+
+function drawTexturedTriangle(
+  ctx: CanvasRenderingContext2D,
+  image: CanvasImageSource,
+  source: [CanvasPoint, CanvasPoint, CanvasPoint],
+  destination: [CanvasPoint, CanvasPoint, CanvasPoint],
+) {
+  const [s0, s1, s2] = source;
+  const [d0, d1, d2] = destination;
+  const denominator = s0.x * (s1.y - s2.y) + s1.x * (s2.y - s0.y) + s2.x * (s0.y - s1.y);
+  if (Math.abs(denominator) < .0001) return;
+  const a = (d0.x * (s1.y - s2.y) + d1.x * (s2.y - s0.y) + d2.x * (s0.y - s1.y)) / denominator;
+  const b = (d0.y * (s1.y - s2.y) + d1.y * (s2.y - s0.y) + d2.y * (s0.y - s1.y)) / denominator;
+  const c = (d0.x * (s2.x - s1.x) + d1.x * (s0.x - s2.x) + d2.x * (s1.x - s0.x)) / denominator;
+  const d = (d0.y * (s2.x - s1.x) + d1.y * (s0.x - s2.x) + d2.y * (s1.x - s0.x)) / denominator;
+  const e = (d0.x * (s1.x * s2.y - s2.x * s1.y) + d1.x * (s2.x * s0.y - s0.x * s2.y) + d2.x * (s0.x * s1.y - s1.x * s0.y)) / denominator;
+  const f = (d0.y * (s1.x * s2.y - s2.x * s1.y) + d1.y * (s2.x * s0.y - s0.x * s2.y) + d2.y * (s0.x * s1.y - s1.x * s0.y)) / denominator;
+  ctx.save();
+  ctx.beginPath();
+  ctx.moveTo(d0.x, d0.y);
+  ctx.lineTo(d1.x, d1.y);
+  ctx.lineTo(d2.x, d2.y);
+  ctx.closePath();
+  ctx.clip();
+  ctx.setTransform(a, b, c, d, e, f);
+  ctx.drawImage(image, 0, 0);
+  ctx.restore();
+}
+
+function drawPerspectivePlate(ctx: CanvasRenderingContext2D, plate: HTMLCanvasElement, corners: PlateCorners, width: number, height: number) {
+  const destination = corners.map((point) => ({ x: point.x * width, y: point.y * height })) as [CanvasPoint, CanvasPoint, CanvasPoint, CanvasPoint];
+  const source: [CanvasPoint, CanvasPoint, CanvasPoint, CanvasPoint] = [
+    { x: 0, y: 0 },
+    { x: plate.width, y: 0 },
+    { x: plate.width, y: plate.height },
+    { x: 0, y: plate.height },
+  ];
+  drawTexturedTriangle(ctx, plate, [source[0], source[1], source[2]], [destination[0], destination[1], destination[2]]);
+  drawTexturedTriangle(ctx, plate, [source[0], source[2], source[3]], [destination[0], destination[2], destination[3]]);
+}
+
+function getMotionGeometry(sourceWidth: number, sourceHeight: number, direction: MotionDirection, outputWidth: number, outputHeight: number) {
+  const scale = Math.min(outputWidth * .72 / sourceWidth, outputHeight * .72 / sourceHeight);
+  const width = sourceWidth * scale;
+  const height = sourceHeight * scale;
+  const horizontal = direction === "leftToRight" || direction === "rightToLeft";
+  return { width, height, distance: horizontal ? outputWidth + width : outputHeight + height };
+}
+
+function drawVehicleMotionFrame(canvas: HTMLCanvasElement, source: HTMLCanvasElement, direction: MotionDirection, progress: number, outputWidth: number, outputHeight: number) {
+  if (canvas.width !== outputWidth) canvas.width = outputWidth;
+  if (canvas.height !== outputHeight) canvas.height = outputHeight;
+  const ctx = canvas.getContext("2d")!;
+  ctx.clearRect(0, 0, outputWidth, outputHeight);
+  const gradient = ctx.createLinearGradient(0, 0, outputWidth, outputHeight);
+  gradient.addColorStop(0, "#11171c");
+  gradient.addColorStop(.52, "#303940");
+  gradient.addColorStop(1, "#090d10");
+  ctx.fillStyle = gradient;
+  ctx.fillRect(0, 0, outputWidth, outputHeight);
+
+  const backgroundScale = Math.max(outputWidth / source.width, outputHeight / source.height) * 1.08;
+  const backgroundWidth = source.width * backgroundScale;
+  const backgroundHeight = source.height * backgroundScale;
+  ctx.save();
+  ctx.globalAlpha = .28;
+  ctx.filter = "blur(28px) brightness(.52) saturate(.78)";
+  ctx.drawImage(source, (outputWidth - backgroundWidth) / 2, (outputHeight - backgroundHeight) / 2, backgroundWidth, backgroundHeight);
+  ctx.restore();
+
+  const geometry = getMotionGeometry(source.width, source.height, direction, outputWidth, outputHeight);
+  let x = (outputWidth - geometry.width) / 2;
+  let y = (outputHeight - geometry.height) / 2;
+  if (direction === "leftToRight") x = -geometry.width + progress * geometry.distance;
+  if (direction === "rightToLeft") x = outputWidth - progress * geometry.distance;
+  if (direction === "topToBottom") y = -geometry.height + progress * geometry.distance;
+  if (direction === "bottomToTop") y = outputHeight - progress * geometry.distance;
+
+  ctx.save();
+  ctx.shadowColor = "rgba(0,0,0,.58)";
+  ctx.shadowBlur = 34;
+  ctx.shadowOffsetY = 18;
+  ctx.beginPath();
+  ctx.roundRect(x, y, geometry.width, geometry.height, 10);
+  ctx.clip();
+  ctx.drawImage(source, x, y, geometry.width, geometry.height);
+  ctx.restore();
+}
+
 // Character boxes use GA 36 dimensions also demonstrated by the referenced open-source generators.
 function getGlyphBoxes(value: string, kind: PlateKind): GlyphBox[] {
   if (REAR_KINDS.includes(kind)) {
@@ -229,14 +332,28 @@ export default function Home() {
   const noticeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const previewCanvas = useRef<HTMLCanvasElement>(null);
   const vehicleCanvas = useRef<HTMLCanvasElement>(null);
+  const motionCanvas = useRef<HTMLCanvasElement>(null);
+  const motionPreviewFrame = useRef<number | null>(null);
+  const motionRecordFrame = useRef<number | null>(null);
+  const activeRecorder = useRef<MediaRecorder | null>(null);
+  const recordedMotionObjectUrl = useRef<string | null>(null);
   const vehicleImage = useRef<HTMLImageElement | null>(null);
   const vehicleObjectUrl = useRef<string | null>(null);
   const isDraggingPlate = useRef(false);
   const [vehicleReady, setVehicleReady] = useState(false);
+  const [vehicleAspect, setVehicleAspect] = useState(16 / 9);
   const [vehicleName, setVehicleName] = useState("");
   const [vehiclePlacement, setVehiclePlacement] = useState<VehiclePlacement>(DEFAULT_VEHICLE_PLACEMENT);
   const [detectedPlacement, setDetectedPlacement] = useState<VehiclePlacement>(DEFAULT_VEHICLE_PLACEMENT);
   const [detectionStatus, setDetectionStatus] = useState("等待车辆图片");
+  const [motionDirection, setMotionDirection] = useState<MotionDirection>("leftToRight");
+  const [motionSpeed, setMotionSpeed] = useState(220);
+  const [motionResolution, setMotionResolution] = useState<MotionResolutionId>("720p");
+  const [motionWidth, setMotionWidth] = useState(1280);
+  const [motionHeight, setMotionHeight] = useState(720);
+  const [isRecordingMotion, setIsRecordingMotion] = useState(false);
+  const [motionProgress, setMotionProgress] = useState(0);
+  const [recordedMotion, setRecordedMotion] = useState<{ url: string; extension: string } | null>(null);
 
   const current = useMemo(() => PLATE_TYPES.find((item) => item.id === kind)!, [kind]);
   const spec = PLATE_SPECS[kind];
@@ -244,6 +361,33 @@ export default function Home() {
   const serialLength = kind === "nevSmall" || kind === "nevLarge" ? 6 : kind === "port" ? 4 : 5;
   const prefixLength = kind === "tractor" ? 3 : 2;
   const serial = plate.slice(prefixLength);
+  const motionDuration = useMemo(() => vehicleReady
+    ? getMotionGeometry(vehicleAspect, 1, motionDirection, motionWidth, motionHeight).distance / motionSpeed
+    : 0, [motionDirection, motionHeight, motionSpeed, motionWidth, vehicleAspect, vehicleReady]);
+
+  const clearRecordedMotion = () => {
+    if (recordedMotionObjectUrl.current) URL.revokeObjectURL(recordedMotionObjectUrl.current);
+    recordedMotionObjectUrl.current = null;
+    setRecordedMotion(null);
+  };
+
+  const chooseMotionResolution = (value: MotionResolutionId) => {
+    clearRecordedMotion();
+    setMotionResolution(value);
+    if (value === "custom") return;
+    const resolution = MOTION_RESOLUTIONS.find((item) => item.id === value)!;
+    setMotionWidth(resolution.width);
+    setMotionHeight(resolution.height);
+  };
+
+  const setCustomMotionSize = (axis: "width" | "height", value: number) => {
+    clearRecordedMotion();
+    const limited = axis === "width"
+      ? Math.min(3840, Math.max(320, value || 320))
+      : Math.min(2160, Math.max(240, value || 240));
+    if (axis === "width") setMotionWidth(limited);
+    else setMotionHeight(limited);
+  };
 
   const toast = (message: string) => {
     setNotice(message);
@@ -476,18 +620,29 @@ export default function Home() {
     const targetWidth = canvas.width * vehiclePlacement.width;
     const targetHeight = canvas.height * vehiclePlacement.height;
     ctx.save();
-    ctx.translate(canvas.width * vehiclePlacement.x, canvas.height * vehiclePlacement.y);
-    ctx.rotate(vehiclePlacement.rotation * Math.PI / 180);
     ctx.fillStyle = "rgba(5,8,10,.42)";
-    ctx.beginPath();
-    ctx.roundRect(-targetWidth * .515, -targetHeight * .56, targetWidth * 1.03, targetHeight * 1.12, Math.max(2, targetHeight * .08));
-    ctx.fill();
     ctx.shadowColor = "rgba(0,0,0,.5)";
     ctx.shadowBlur = Math.max(2, targetHeight * .06);
     ctx.shadowOffsetY = Math.max(1, targetHeight * .035);
     ctx.filter = `brightness(${vehiclePlacement.brightness}) contrast(.96) saturate(.94)`;
     ctx.globalAlpha = .985;
-    ctx.drawImage(plateCanvas, -targetWidth / 2, -targetHeight / 2, targetWidth, targetHeight);
+    if (vehiclePlacement.corners) {
+      const corners = vehiclePlacement.corners.map((point) => ({ x: point.x * canvas.width, y: point.y * canvas.height })) as [CanvasPoint, CanvasPoint, CanvasPoint, CanvasPoint];
+      const center = corners.reduce((sum, point) => ({ x: sum.x + point.x / 4, y: sum.y + point.y / 4 }), { x: 0, y: 0 });
+      ctx.beginPath();
+      ctx.moveTo(center.x + (corners[0].x - center.x) * 1.035, center.y + (corners[0].y - center.y) * 1.08);
+      corners.slice(1).forEach((point) => ctx.lineTo(center.x + (point.x - center.x) * 1.035, center.y + (point.y - center.y) * 1.08));
+      ctx.closePath();
+      ctx.fill();
+      drawPerspectivePlate(ctx, plateCanvas, vehiclePlacement.corners, canvas.width, canvas.height);
+    } else {
+      ctx.translate(canvas.width * vehiclePlacement.x, canvas.height * vehiclePlacement.y);
+      ctx.rotate(vehiclePlacement.rotation * Math.PI / 180);
+      ctx.beginPath();
+      ctx.roundRect(-targetWidth * .515, -targetHeight * .56, targetWidth * 1.03, targetHeight * 1.12, Math.max(2, targetHeight * .08));
+      ctx.fill();
+      ctx.drawImage(plateCanvas, -targetWidth / 2, -targetHeight / 2, targetWidth, targetHeight);
+    }
     ctx.restore();
   }, [renderPlate, vehiclePlacement]);
 
@@ -495,36 +650,71 @@ export default function Home() {
     if (vehicleReady) renderVehicleComposite();
   }, [renderVehicleComposite, vehicleReady]);
 
+  useEffect(() => {
+    const canvas = motionCanvas.current;
+    const source = vehicleCanvas.current;
+    if (!vehicleReady || !canvas || !source || isRecordingMotion) return;
+    const startedAt = performance.now();
+    const animate = (now: number) => {
+      const geometry = getMotionGeometry(source.width, source.height, motionDirection, motionWidth, motionHeight);
+      const progress = ((now - startedAt) / 1000 * motionSpeed / geometry.distance) % 1;
+      drawVehicleMotionFrame(canvas, source, motionDirection, progress, motionWidth, motionHeight);
+      motionPreviewFrame.current = requestAnimationFrame(animate);
+    };
+    motionPreviewFrame.current = requestAnimationFrame(animate);
+    return () => {
+      if (motionPreviewFrame.current !== null) cancelAnimationFrame(motionPreviewFrame.current);
+      motionPreviewFrame.current = null;
+    };
+  }, [isRecordingMotion, kind, motionDirection, motionHeight, motionSpeed, motionWidth, plate, vehiclePlacement, vehicleReady]);
+
   useEffect(() => () => {
     if (vehicleObjectUrl.current) URL.revokeObjectURL(vehicleObjectUrl.current);
+    if (motionPreviewFrame.current !== null) cancelAnimationFrame(motionPreviewFrame.current);
+    if (motionRecordFrame.current !== null) cancelAnimationFrame(motionRecordFrame.current);
+    if (activeRecorder.current?.state === "recording") activeRecorder.current.stop();
+    if (recordedMotionObjectUrl.current) URL.revokeObjectURL(recordedMotionObjectUrl.current);
   }, []);
 
-  const runVehicleDetection = (source = vehicleImage.current) => {
+  const runVehicleDetection = async (source = vehicleImage.current) => {
     if (!source) {
       toast("请先上传车辆正面图片");
       return;
     }
-    setDetectionStatus("正在自动识别车牌区域…");
-    requestAnimationFrame(() => {
-      const detected = detectVehiclePlate(source);
+    setDetectionStatus("正在加载 AI 模型并识别车牌四角…");
+    await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+    try {
+      const detected = await detectPlateWithYuNet(source);
       if (detected) {
         setDetectedPlacement(detected.placement);
         setVehiclePlacement(detected.placement);
-        setDetectionStatus(`已自动识别 · 置信度 ${Math.round(detected.confidence * 100)}%`);
-        toast("已识别原车牌位置并完成覆盖");
+        setDetectionStatus(`AI 四角识别完成 · 置信度 ${Math.round(detected.confidence * 100)}%`);
+        toast("已识别车牌四角并完成透视覆盖");
         return;
       }
-      const fallbackWidth = .26;
-      const fallback = {
-        ...DEFAULT_VEHICLE_PLACEMENT,
-        width: fallbackWidth,
-        height: Math.min(.18, Math.max(.04, fallbackWidth * source.naturalWidth / source.naturalHeight * spec.height / spec.width)),
-      };
-      setDetectedPlacement(fallback);
-      setVehiclePlacement(fallback);
-      setDetectionStatus("未可靠识别 · 已使用默认位置");
-      toast("未可靠识别车牌，请拖动微调");
-    });
+    } catch (error) {
+      console.warn("LPD-YuNet detection failed, using local fallback.", error);
+    }
+    setDetectionStatus("AI 模型未找到车牌 · 正在使用本地扫描…");
+    await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+    const detected = detectVehiclePlate(source);
+    if (detected) {
+      setDetectedPlacement(detected.placement);
+      setVehiclePlacement(detected.placement);
+      setDetectionStatus(`本地扫描已定位 · 置信度 ${Math.round(detected.confidence * 100)}%`);
+      toast("AI 识别不可用，已用本地扫描完成覆盖");
+      return;
+    }
+    const fallbackWidth = .26;
+    const fallback = {
+      ...DEFAULT_VEHICLE_PLACEMENT,
+      width: fallbackWidth,
+      height: Math.min(.18, Math.max(.04, fallbackWidth * source.naturalWidth / source.naturalHeight * spec.height / spec.width)),
+    };
+    setDetectedPlacement(fallback);
+    setVehiclePlacement(fallback);
+    setDetectionStatus("未可靠识别 · 已使用默认位置");
+    toast("未可靠识别车牌，请拖动微调");
   };
 
   const uploadVehicle = (event: ChangeEvent<HTMLInputElement>) => {
@@ -541,6 +731,7 @@ export default function Home() {
       if (vehicleObjectUrl.current) URL.revokeObjectURL(vehicleObjectUrl.current);
       vehicleObjectUrl.current = nextUrl;
       vehicleImage.current = image;
+      setVehicleAspect(image.naturalWidth / image.naturalHeight);
       setVehicleName(file.name);
       setVehicleReady(true);
       runVehicleDetection(image);
@@ -558,7 +749,19 @@ export default function Home() {
     const rect = event.currentTarget.getBoundingClientRect();
     const x = Math.min(.95, Math.max(.05, (event.clientX - rect.left) / rect.width));
     const y = Math.min(.95, Math.max(.05, (event.clientY - rect.top) / rect.height));
-    setVehiclePlacement((currentPlacement) => ({ ...currentPlacement, x, y }));
+    setVehiclePlacement((currentPlacement) => {
+      const deltaX = x - currentPlacement.x;
+      const deltaY = y - currentPlacement.y;
+      return {
+        ...currentPlacement,
+        x,
+        y,
+        corners: currentPlacement.corners?.map((point) => ({
+          x: Math.min(.995, Math.max(.005, point.x + deltaX)),
+          y: Math.min(.995, Math.max(.005, point.y + deltaY)),
+        })) as PlateCorners | undefined,
+      };
+    });
   };
 
   const startMovingVehiclePlate = (event: ReactPointerEvent<HTMLCanvasElement>) => {
@@ -573,8 +776,8 @@ export default function Home() {
     if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
   };
 
-  const setPlacementValue = (key: keyof VehiclePlacement, value: number) => {
-    setVehiclePlacement((currentPlacement) => ({ ...currentPlacement, [key]: value }));
+  const setPlacementValue = (key: Exclude<keyof VehiclePlacement, "corners">, value: number) => {
+    setVehiclePlacement((currentPlacement) => ({ ...currentPlacement, [key]: value, corners: undefined }));
   };
 
   const downloadVehicleComposite = () => {
@@ -583,11 +786,97 @@ export default function Home() {
       return;
     }
     renderVehicleComposite();
+    if (recordedMotionObjectUrl.current) {
+      URL.revokeObjectURL(recordedMotionObjectUrl.current);
+      recordedMotionObjectUrl.current = null;
+      setRecordedMotion(null);
+    }
     const link = document.createElement("a");
     link.download = `vehicle-${plate}.png`;
     link.href = vehicleCanvas.current.toDataURL("image/png");
     link.click();
     toast("车辆合成图已导出");
+  };
+
+  const downloadMotionVideo = () => {
+    const canvas = motionCanvas.current;
+    const source = vehicleCanvas.current;
+    if (!vehicleReady || !canvas || !source) {
+      toast("请先生成车辆合成图片");
+      return;
+    }
+    const captureCanvas = canvas as HTMLCanvasElement & { captureStream?: (frameRate?: number) => MediaStream };
+    if (!captureCanvas.captureStream || typeof MediaRecorder === "undefined") {
+      toast("当前浏览器不支持视频生成，请使用最新版 Chrome、Edge 或 Safari");
+      return;
+    }
+
+    renderVehicleComposite();
+    const supportedTypes = [
+      "video/mp4;codecs=avc1.42E01E",
+      "video/webm;codecs=vp9",
+      "video/webm;codecs=vp8",
+      "video/webm",
+    ];
+    const mimeType = supportedTypes.find((type) => MediaRecorder.isTypeSupported(type)) || "";
+    const stream = captureCanvas.captureStream(30);
+    const chunks: Blob[] = [];
+    let recorder: MediaRecorder;
+    try {
+      recorder = new MediaRecorder(stream, mimeType ? { mimeType, videoBitsPerSecond: 8_000_000 } : { videoBitsPerSecond: 8_000_000 });
+    } catch {
+      stream.getTracks().forEach((track) => track.stop());
+      toast("无法启动视频编码器，请更换浏览器后重试");
+      return;
+    }
+
+    const duration = getMotionGeometry(source.width, source.height, motionDirection, motionWidth, motionHeight).distance / motionSpeed;
+    recorder.ondataavailable = (event) => { if (event.data.size) chunks.push(event.data); };
+    recorder.onerror = () => {
+      setIsRecordingMotion(false);
+      stream.getTracks().forEach((track) => track.stop());
+      toast("视频生成失败，请重试");
+    };
+    recorder.onstop = () => {
+      stream.getTracks().forEach((track) => track.stop());
+      activeRecorder.current = null;
+      setIsRecordingMotion(false);
+      setMotionProgress(0);
+      if (!chunks.length) return;
+      const finalType = recorder.mimeType || mimeType || "video/webm";
+      const extension = finalType.includes("mp4") ? "mp4" : "webm";
+      const url = URL.createObjectURL(new Blob(chunks, { type: finalType }));
+      recordedMotionObjectUrl.current = url;
+      setRecordedMotion({ url, extension });
+      const link = document.createElement("a");
+      link.download = `vehicle-motion-${plate}-${motionDirection}-${motionWidth}x${motionHeight}.${extension}`;
+      link.href = url;
+      link.click();
+      toast(`视频生成完成，可保存为 ${extension.toUpperCase()}`);
+    };
+
+    setIsRecordingMotion(true);
+    setMotionProgress(0);
+    activeRecorder.current = recorder;
+    drawVehicleMotionFrame(canvas, source, motionDirection, 0, motionWidth, motionHeight);
+    recorder.start(250);
+    const startedAt = performance.now();
+    let lastProgressUpdate = 0;
+    const recordFrame = (now: number) => {
+      const progress = Math.min(1, (now - startedAt) / 1000 / duration);
+      drawVehicleMotionFrame(canvas, source, motionDirection, progress, motionWidth, motionHeight);
+      if (now - lastProgressUpdate > 100) {
+        setMotionProgress(progress);
+        lastProgressUpdate = now;
+      }
+      if (progress < 1) {
+        motionRecordFrame.current = requestAnimationFrame(recordFrame);
+      } else {
+        motionRecordFrame.current = null;
+        window.setTimeout(() => { if (recorder.state === "recording") recorder.stop(); }, 120);
+      }
+    };
+    motionRecordFrame.current = requestAnimationFrame(recordFrame);
   };
 
   const download = () => {
@@ -605,7 +894,7 @@ export default function Home() {
     <main>
       <nav className="topbar">
         <a className="brand" href="#top" aria-label="牌研所首页"><span className="brand-mark">牌</span><span>牌研所<small>PLATE LAB</small></span></a>
-        <div className="nav-right"><span className="status"><i /> 规则库 GA 36—2018</span><a href="#vehicle-studio">车辆合成</a><a href="https://baike.baidu.com/item/中华人民共和国机动车号牌/65692407" target="_blank" rel="noreferrer">参考文档 ↗</a></div>
+        <div className="nav-right"><span className="status"><i /> 规则库 GA 36—2018</span><a href="#vehicle-studio">车辆合成</a><a href="#motion-studio">动画视频</a><a href="https://baike.baidu.com/item/中华人民共和国机动车号牌/65692407" target="_blank" rel="noreferrer">参考文档 ↗</a></div>
       </nav>
 
       <section className="workspace" id="top">
@@ -642,7 +931,7 @@ export default function Home() {
       <section className="vehicle-studio" id="vehicle-studio">
         <div className="vehicle-studio-heading">
           <div><span className="eyebrow">车辆图片合成</span><h2>把当前车牌安装到车辆正面图</h2></div>
-          <p>图片只在本机浏览器处理。载入后自动识别原车牌位置与大小并完成覆盖，也可继续拖动微调。</p>
+          <p>图片只在本机浏览器处理。AI 自动识别原车牌四角、尺寸与倾斜透视并完成覆盖，也可继续拖动微调。</p>
         </div>
         <div className="vehicle-studio-grid">
           <div className={`vehicle-photo-stage ${vehicleReady ? "has-image" : ""}`}>
@@ -661,14 +950,14 @@ export default function Home() {
               <label className="vehicle-empty">
                 <span>＋</span>
                 <b>上传车辆正面图片</b>
-                <small>支持 JPG、PNG、WebP · 自动识别车牌位置和尺寸</small>
+                <small>支持 JPG、PNG、WebP · AI 自动识别车牌四角和尺寸</small>
                 <input type="file" accept="image/jpeg,image/png,image/webp" onChange={uploadVehicle} />
               </label>
             )}
           </div>
           <aside className="vehicle-tools">
             <div className="vehicle-tool-head"><span>定位控制</span><small>{vehicleReady ? vehicleName : "等待车辆图片"}</small></div>
-            <div className="vehicle-detection-status"><i className={detectionStatus.startsWith("已自动") ? "success" : ""} />{detectionStatus}</div>
+            <div className="vehicle-detection-status"><i className={detectionStatus.includes("完成") || detectionStatus.includes("已定位") ? "success" : ""} />{detectionStatus}</div>
             <div className="vehicle-detection-actions">
               <label className="vehicle-upload-button">选择车辆图片<input type="file" accept="image/jpeg,image/png,image/webp" onChange={uploadVehicle} /></label>
               <button disabled={!vehicleReady} onClick={() => runVehicleDetection()}>重新识别</button>
@@ -684,7 +973,67 @@ export default function Home() {
               <button disabled={!vehicleReady} onClick={() => setVehiclePlacement(detectedPlacement)}>恢复识别</button>
               <button className="vehicle-export" disabled={!vehicleReady} onClick={downloadVehicleComposite}>↓ 导出车辆图片</button>
             </div>
-            <p>自动识别会优先寻找车辆下半部的白、蓝或黄底矩形车牌，并匹配原区域尺寸与现场亮度。特殊角度可继续拖动和微调。</p>
+            <p>优先使用 OpenCV LPD-YuNet 中国车牌模型定位四个角点，自动匹配透视、尺寸和现场亮度；模型不可用时会切换本地扫描。拖动位置后仍保留透视，调整尺寸或角度则进入手动矩形模式。</p>
+          </aside>
+        </div>
+      </section>
+
+      <section className="motion-studio" id="motion-studio">
+        <div className="vehicle-studio-heading">
+          <div><span className="eyebrow">车辆平移动画</span><h2>让生成的车辆图片穿过画面</h2></div>
+          <p>选择分辨率、移动方向和速度，实时预览与最终视频使用同一套 30 FPS 渲染逻辑。生成完成后视频会自动保存。</p>
+        </div>
+        <div className="motion-studio-grid">
+          <div className={`motion-stage ${vehicleReady ? "has-image" : ""}`}>
+            <canvas ref={motionCanvas} className="motion-canvas" aria-label="车辆平移动画预览" role="img" />
+            {!vehicleReady && <div className="motion-placeholder"><span>▶</span><b>请先上传车辆图片并完成车牌合成</b><small>合成结果会自动成为动画素材</small></div>}
+            {isRecordingMotion && <div className="motion-recording"><i /> 正在生成视频 {Math.round(motionProgress * 100)}%</div>}
+          </div>
+          <aside className="motion-tools">
+            <div className="vehicle-tool-head"><span>动画控制</span><small>{motionWidth}×{motionHeight} · 30 FPS</small></div>
+            <label className="motion-resolution">
+              <span className="motion-label">视频分辨率</span>
+              <select value={motionResolution} disabled={isRecordingMotion} onChange={(event) => chooseMotionResolution(event.target.value as MotionResolutionId)}>
+                {MOTION_RESOLUTIONS.map((resolution) => <option key={resolution.id} value={resolution.id}>{resolution.name}</option>)}
+                <option value="custom">自定义宽高</option>
+              </select>
+            </label>
+            {motionResolution === "custom" && (
+              <div className="motion-custom-size">
+                <label><span>宽度</span><input type="number" min="320" max="3840" step="2" value={motionWidth} disabled={isRecordingMotion} onChange={(event) => setCustomMotionSize("width", Number(event.target.value))} /></label>
+                <i>×</i>
+                <label><span>高度</span><input type="number" min="240" max="2160" step="2" value={motionHeight} disabled={isRecordingMotion} onChange={(event) => setCustomMotionSize("height", Number(event.target.value))} /></label>
+              </div>
+            )}
+            <span className="motion-label">移动方向</span>
+            <div className="motion-directions">
+              {MOTION_DIRECTIONS.map((direction) => (
+                <button
+                  key={direction.id}
+                  className={motionDirection === direction.id ? "active" : ""}
+                  disabled={isRecordingMotion}
+                  onClick={() => { clearRecordedMotion(); setMotionDirection(direction.id); }}
+                ><i>{direction.arrow}</i>{direction.name}</button>
+              ))}
+            </div>
+            <label className="motion-speed">
+              <span>移动速度 <i>{motionSpeed} 像素/秒</i></span>
+              <input type="range" min="80" max="500" step="20" value={motionSpeed} disabled={isRecordingMotion} onChange={(event) => { clearRecordedMotion(); setMotionSpeed(Number(event.target.value)); }} />
+              <small><b>慢速</b><b>快速</b></small>
+            </label>
+            <div className="motion-summary">
+              <span>预计视频时长<b>{motionDuration ? `${motionDuration.toFixed(1)} 秒` : "—"}</b></span>
+              <span>输出规格<b>{motionWidth}×{motionHeight} · 30 FPS</b></span>
+            </div>
+            <button className="motion-export" disabled={!vehicleReady || isRecordingMotion} onClick={downloadMotionVideo}>
+              {isRecordingMotion ? `正在生成 ${Math.round(motionProgress * 100)}%` : recordedMotion ? "● 重新生成视频" : "● 生成并保存视频"}
+            </button>
+            {recordedMotion && (
+              <a className="motion-download" href={recordedMotion.url} download={`vehicle-motion-${plate}-${motionDirection}-${motionWidth}x${motionHeight}.${recordedMotion.extension}`}>
+                ↓ 保存已生成视频（{recordedMotion.extension.toUpperCase()}）
+              </a>
+            )}
+            <p>视频格式由浏览器自动选择：支持 H.264 时保存 MP4，否则保存兼容性更好的 WebM。图片与视频均只在本机生成。</p>
           </aside>
         </div>
       </section>

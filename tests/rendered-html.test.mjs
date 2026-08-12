@@ -28,13 +28,16 @@ test("server-renders the license plate generator", async () => {
   assert.match(html, /临时号牌/);
   assert.match(html, /车辆图片合成/);
   assert.match(html, /上传车辆正面图片/);
-  assert.match(html, /自动识别车牌位置和尺寸/);
+  assert.match(html, /AI 自动识别车牌四角和尺寸/);
+  assert.match(html, /车辆平移动画/);
+  assert.match(html, /生成并保存视频/);
   assert.doesNotMatch(html, /SAMPLE|仅供设计测试/i);
 });
 
 test("keeps physical dimensions and safe export rules in source", async () => {
-  const [page, css, readme] = await Promise.all([
+  const [page, detector, css, readme] = await Promise.all([
     readFile(new URL("../app/page.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../app/plate-detector.ts", import.meta.url), "utf8"),
     readFile(new URL("../app/globals.css", import.meta.url), "utf8"),
     readFile(new URL("../README.md", import.meta.url), "utf8"),
   ]);
@@ -58,10 +61,27 @@ test("keeps physical dimensions and safe export rules in source", async () => {
   assert.match(page, /renderVehicleComposite/);
   assert.match(page, /detectVehiclePlate/);
   assert.match(page, /plateColor\[pixelIndex\]/);
-  assert.match(page, /已自动识别 · 置信度/);
+  assert.match(page, /AI 四角识别完成 · 置信度/);
+  assert.match(page, /drawPerspectivePlate/);
+  assert.match(detector, /detectPlateWithYuNet/);
+  assert.match(detector, /license_plate_detection_lpd_yunet_2023mar\.onnx/);
+  assert.match(detector, /AI 模型首次加载超时/);
+  assert.match(detector, /\[4, 5\], \[6, 7\], \[10, 11\], \[12, 13\]/);
   assert.match(page, /targetHeight = canvas\.height \* vehiclePlacement\.height/);
   assert.match(page, /brightness\(\$\{vehiclePlacement\.brightness\}\)/);
   assert.match(page, /vehicleCanvas\.current\.toDataURL\("image\/png"\)/);
+  assert.match(page, /drawVehicleMotionFrame/);
+  assert.match(page, /captureStream\(30\)/);
+  assert.match(page, /new MediaRecorder/);
+  assert.match(page, /video\/mp4;codecs=avc1\.42E01E/);
+  assert.match(page, /video\/webm;codecs=vp9/);
+  assert.match(page, /保存已生成视频/);
+  assert.match(page, /480p · 854×480/);
+  assert.match(page, /720p · 1280×720/);
+  assert.match(page, /1080p · 1920×1080/);
+  assert.match(page, /自定义宽高/);
+  assert.match(page, /max="3840"/);
+  assert.match(page, /max="2160"/);
   assert.match(page, /onPointerMove=\{moveVehiclePlate\}/);
   assert.match(page, /请勿用于伪造证件或违法用途/);
   assert.match(css, /\.plate-energy \{ aspect-ratio:24\/7; \}/);
