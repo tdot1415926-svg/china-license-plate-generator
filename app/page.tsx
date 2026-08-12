@@ -1,20 +1,284 @@
 "use client";
 
-import { useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent, type PointerEvent as ReactPointerEvent } from "react";
+import { detectPlateWithYuNet, type PlateCorners, type PlateDetection, type VehiclePlacement } from "./plate-detector";
 
 const PROVINCES = ["京", "津", "沪", "渝", "冀", "豫", "云", "辽", "黑", "湘", "皖", "鲁", "新", "苏", "浙", "赣", "鄂", "桂", "甘", "晋", "蒙", "陕", "吉", "闽", "贵", "粤", "青", "藏", "川", "宁", "琼"];
 const LETTERS = "ABCDEFGHJKLMNPQRSTUVWXYZ";
 const SERIAL = "0123456789ABCDEFGHJKLMNPQRSTUVWXYZ";
+const TEMP_KINDS: PlateKind[] = ["temp", "tempTrial", "tempOversize", "tempEntry"];
+const REAR_KINDS: PlateKind[] = ["yellowRear", "trailer"];
+const GLYPH_KINDS: PlateKind[] = ["blue", "yellow", "yellowRear", "nevSmall", "nevLarge", "coach", "trailer", "hkmo"];
 
-type PlateKind = "blue" | "yellow" | "nevSmall" | "nevLarge" | "coach" | "trailer" | "hkmo" | "tractor" | "field" | "port" | "aviation" | "temp" | "tempTrial" | "tempOversize" | "tempEntry";
+type PlateKind = "blue" | "yellow" | "yellowRear" | "nevSmall" | "nevLarge" | "coach" | "trailer" | "hkmo" | "tractor" | "field" | "port" | "aviation" | "temp" | "tempTrial" | "tempOversize" | "tempEntry";
+
+const PLATE_SPECS: Record<PlateKind, { width: number; height: number }> = {
+  blue: { width: 440, height: 140 }, yellow: { width: 440, height: 140 }, yellowRear: { width: 440, height: 220 },
+  nevSmall: { width: 480, height: 140 }, nevLarge: { width: 480, height: 140 }, coach: { width: 440, height: 140 },
+  trailer: { width: 440, height: 220 }, hkmo: { width: 440, height: 140 }, tractor: { width: 440, height: 140 },
+  field: { width: 440, height: 140 }, port: { width: 440, height: 140 }, aviation: { width: 440, height: 140 },
+  temp: { width: 220, height: 140 }, tempTrial: { width: 220, height: 140 }, tempOversize: { width: 220, height: 140 }, tempEntry: { width: 220, height: 140 },
+};
+
+const TEMP_LAYOUT = {
+  titleY: 45,
+  numberY: 132,
+  expiryY: 211,
+  noteY: 249,
+  horizontalPadding: 24,
+};
+
+type GlyphBox = { char: string; x: number; y: number; width: number; height: number; row: "single" | "upper" | "lower" };
+type MotionDirection = "leftToRight" | "rightToLeft" | "topToBottom" | "bottomToTop";
+type MotionResolutionId = "480p" | "720p" | "1080p" | "custom";
+const DEFAULT_VEHICLE_PLACEMENT: VehiclePlacement = { x: .5, y: .68, width: .26, height: .085, rotation: 0, brightness: 1 };
+
+const MOTION_DIRECTIONS: { id: MotionDirection; name: string; arrow: string }[] = [
+  { id: "leftToRight", name: "左到右", arrow: "→" },
+  { id: "rightToLeft", name: "右到左", arrow: "←" },
+  { id: "topToBottom", name: "上到下", arrow: "↓" },
+  { id: "bottomToTop", name: "下到上", arrow: "↑" },
+];
+
+const MOTION_RESOLUTIONS: { id: Exclude<MotionResolutionId, "custom">; name: string; width: number; height: number }[] = [
+  { id: "480p", name: "480p · 854×480", width: 854, height: 480 },
+  { id: "720p", name: "720p · 1280×720", width: 1280, height: 720 },
+  { id: "1080p", name: "1080p · 1920×1080", width: 1920, height: 1080 },
+];
+
+function detectVehiclePlate(image: HTMLImageElement): PlateDetection | null {
+  const width = Math.min(640, image.naturalWidth);
+  const height = Math.max(1, Math.round(image.naturalHeight * width / image.naturalWidth));
+  const canvas = document.createElement("canvas");
+  canvas.width = width;
+  canvas.height = height;
+  const ctx = canvas.getContext("2d", { willReadFrequently: true })!;
+  ctx.drawImage(image, 0, 0, width, height);
+  const pixels = ctx.getImageData(0, 0, width, height).data;
+  const gray = new Float32Array(width * height);
+  const plateColor = new Uint8Array(width * height);
+  const dark = new Uint8Array(width * height);
+
+  for (let index = 0; index < gray.length; index += 1) {
+    const offset = index * 4;
+    const red = pixels[offset];
+    const green = pixels[offset + 1];
+    const blue = pixels[offset + 2];
+    const brightness = (red + green + blue) / 3;
+    const saturation = Math.max(red, green, blue) - Math.min(red, green, blue);
+    const isWhite = brightness > 145 && saturation < 75;
+    const isBlue = blue > 85 && blue > red * 1.16 && blue > green * 1.05;
+    const isYellow = red > 120 && green > 85 && blue < 135 && red + green > blue * 2.15;
+    gray[index] = red * .299 + green * .587 + blue * .114;
+    plateColor[index] = isWhite || isBlue || isYellow ? 1 : 0;
+    dark[index] = brightness < 85 ? 1 : 0;
+  }
+
+  const integralWidth = width + 1;
+  const integralSize = integralWidth * (height + 1);
+  const colorIntegral = new Float64Array(integralSize);
+  const edgeIntegral = new Float64Array(integralSize);
+  const darkIntegral = new Float64Array(integralSize);
+  const grayIntegral = new Float64Array(integralSize);
+  const graySquareIntegral = new Float64Array(integralSize);
+  for (let y = 0; y < height; y += 1) {
+    let colorRow = 0;
+    let edgeRow = 0;
+    let darkRow = 0;
+    let grayRow = 0;
+    let squareRow = 0;
+    for (let x = 0; x < width; x += 1) {
+      const pixelIndex = y * width + x;
+      const value = gray[pixelIndex];
+      const horizontalEdge = x ? Math.abs(value - gray[pixelIndex - 1]) : 0;
+      const verticalEdge = y ? Math.abs(value - gray[pixelIndex - width]) : 0;
+      colorRow += plateColor[pixelIndex];
+      edgeRow += Math.min(1, (horizontalEdge + verticalEdge) / 100);
+      darkRow += dark[pixelIndex];
+      grayRow += value;
+      squareRow += value * value;
+      const integralIndex = (y + 1) * integralWidth + x + 1;
+      const above = integralIndex - integralWidth;
+      colorIntegral[integralIndex] = colorIntegral[above] + colorRow;
+      edgeIntegral[integralIndex] = edgeIntegral[above] + edgeRow;
+      darkIntegral[integralIndex] = darkIntegral[above] + darkRow;
+      grayIntegral[integralIndex] = grayIntegral[above] + grayRow;
+      graySquareIntegral[integralIndex] = graySquareIntegral[above] + squareRow;
+    }
+  }
+
+  const areaSum = (integral: Float64Array, x: number, y: number, areaWidth: number, areaHeight: number) => {
+    const left = x;
+    const right = x + areaWidth;
+    const top = y;
+    const bottom = y + areaHeight;
+    return integral[bottom * integralWidth + right]
+      - integral[top * integralWidth + right]
+      - integral[bottom * integralWidth + left]
+      + integral[top * integralWidth + left];
+  };
+
+  let best = { score: -Infinity, x: 0, y: 0, width: 0, height: 0, mean: 150 };
+  const aspects = [2.8, 3.2, 3.6, 4, 4.5, 5];
+  for (let candidateWidth = Math.round(width * .1); candidateWidth <= width * .34; candidateWidth += 8) {
+    for (const aspect of aspects) {
+      const candidateHeight = Math.max(12, Math.round(candidateWidth / aspect));
+      const step = Math.max(4, Math.floor(candidateWidth / 16));
+      const maxY = Math.round(height * .88) - candidateHeight;
+      const maxX = Math.round(width * .92) - candidateWidth;
+      for (let y = Math.round(height * .38); y <= maxY; y += step) {
+        for (let x = Math.round(width * .08); x <= maxX; x += step) {
+          const area = candidateWidth * candidateHeight;
+          const colorRatio = areaSum(colorIntegral, x, y, candidateWidth, candidateHeight) / area;
+          const edgeRatio = areaSum(edgeIntegral, x, y, candidateWidth, candidateHeight) / area;
+          const darkRatio = areaSum(darkIntegral, x, y, candidateWidth, candidateHeight) / area;
+          const mean = areaSum(grayIntegral, x, y, candidateWidth, candidateHeight) / area;
+          const variance = Math.max(0, areaSum(graySquareIntegral, x, y, candidateWidth, candidateHeight) / area - mean * mean);
+          const texture = Math.min(1, Math.sqrt(variance) / 80);
+          const centerX = (x + candidateWidth / 2) / width;
+          const centerY = (y + candidateHeight / 2) / height;
+          const positionPrior = Math.exp(-(((centerX - .5) / .28) ** 2) - (((centerY - .66) / .24) ** 2));
+          const characterMix = Math.max(0, 1 - Math.abs(darkRatio - .28) / .32);
+          const sizePrior = Math.exp(-(((candidateWidth / width - .19) / .11) ** 2));
+          const score = colorRatio * 2.5 + edgeRatio * 1.6 + texture * .55 + characterMix * .45 + positionPrior * .55 + sizePrior * .75;
+          if (score > best.score) best = { score, x, y, width: candidateWidth, height: candidateHeight, mean };
+        }
+      }
+    }
+  }
+
+  if (best.score < 2.85) return null;
+  const expandedWidth = Math.min(width * .55, best.width * 1.12);
+  const expandedHeight = Math.min(height * .22, best.height * 1.18);
+  return {
+    placement: {
+      x: Math.min(.95, Math.max(.05, (best.x + best.width / 2) / width)),
+      y: Math.min(.95, Math.max(.05, (best.y + best.height / 2) / height)),
+      width: expandedWidth / width,
+      height: expandedHeight / height,
+      rotation: 0,
+      brightness: Math.min(1.12, Math.max(.8, .78 + best.mean / 255 * .38)),
+    },
+    confidence: Math.min(.99, Math.max(.35, (best.score - 2.85) / 1.35)),
+  };
+}
+
+type CanvasPoint = { x: number; y: number };
+
+function drawTexturedTriangle(
+  ctx: CanvasRenderingContext2D,
+  image: CanvasImageSource,
+  source: [CanvasPoint, CanvasPoint, CanvasPoint],
+  destination: [CanvasPoint, CanvasPoint, CanvasPoint],
+) {
+  const [s0, s1, s2] = source;
+  const [d0, d1, d2] = destination;
+  const denominator = s0.x * (s1.y - s2.y) + s1.x * (s2.y - s0.y) + s2.x * (s0.y - s1.y);
+  if (Math.abs(denominator) < .0001) return;
+  const a = (d0.x * (s1.y - s2.y) + d1.x * (s2.y - s0.y) + d2.x * (s0.y - s1.y)) / denominator;
+  const b = (d0.y * (s1.y - s2.y) + d1.y * (s2.y - s0.y) + d2.y * (s0.y - s1.y)) / denominator;
+  const c = (d0.x * (s2.x - s1.x) + d1.x * (s0.x - s2.x) + d2.x * (s1.x - s0.x)) / denominator;
+  const d = (d0.y * (s2.x - s1.x) + d1.y * (s0.x - s2.x) + d2.y * (s1.x - s0.x)) / denominator;
+  const e = (d0.x * (s1.x * s2.y - s2.x * s1.y) + d1.x * (s2.x * s0.y - s0.x * s2.y) + d2.x * (s0.x * s1.y - s1.x * s0.y)) / denominator;
+  const f = (d0.y * (s1.x * s2.y - s2.x * s1.y) + d1.y * (s2.x * s0.y - s0.x * s2.y) + d2.y * (s0.x * s1.y - s1.x * s0.y)) / denominator;
+  ctx.save();
+  ctx.beginPath();
+  ctx.moveTo(d0.x, d0.y);
+  ctx.lineTo(d1.x, d1.y);
+  ctx.lineTo(d2.x, d2.y);
+  ctx.closePath();
+  ctx.clip();
+  ctx.setTransform(a, b, c, d, e, f);
+  ctx.drawImage(image, 0, 0);
+  ctx.restore();
+}
+
+function drawPerspectivePlate(ctx: CanvasRenderingContext2D, plate: HTMLCanvasElement, corners: PlateCorners, width: number, height: number) {
+  const destination = corners.map((point) => ({ x: point.x * width, y: point.y * height })) as [CanvasPoint, CanvasPoint, CanvasPoint, CanvasPoint];
+  const source: [CanvasPoint, CanvasPoint, CanvasPoint, CanvasPoint] = [
+    { x: 0, y: 0 },
+    { x: plate.width, y: 0 },
+    { x: plate.width, y: plate.height },
+    { x: 0, y: plate.height },
+  ];
+  drawTexturedTriangle(ctx, plate, [source[0], source[1], source[2]], [destination[0], destination[1], destination[2]]);
+  drawTexturedTriangle(ctx, plate, [source[0], source[2], source[3]], [destination[0], destination[2], destination[3]]);
+}
+
+function getMotionGeometry(sourceWidth: number, sourceHeight: number, direction: MotionDirection, outputWidth: number, outputHeight: number) {
+  const scale = Math.min(outputWidth * .72 / sourceWidth, outputHeight * .72 / sourceHeight);
+  const width = sourceWidth * scale;
+  const height = sourceHeight * scale;
+  const horizontal = direction === "leftToRight" || direction === "rightToLeft";
+  return { width, height, distance: horizontal ? outputWidth + width : outputHeight + height };
+}
+
+function drawVehicleMotionFrame(canvas: HTMLCanvasElement, source: HTMLCanvasElement, direction: MotionDirection, progress: number, outputWidth: number, outputHeight: number) {
+  if (canvas.width !== outputWidth) canvas.width = outputWidth;
+  if (canvas.height !== outputHeight) canvas.height = outputHeight;
+  const ctx = canvas.getContext("2d")!;
+  ctx.clearRect(0, 0, outputWidth, outputHeight);
+  const gradient = ctx.createLinearGradient(0, 0, outputWidth, outputHeight);
+  gradient.addColorStop(0, "#11171c");
+  gradient.addColorStop(.52, "#303940");
+  gradient.addColorStop(1, "#090d10");
+  ctx.fillStyle = gradient;
+  ctx.fillRect(0, 0, outputWidth, outputHeight);
+
+  const backgroundScale = Math.max(outputWidth / source.width, outputHeight / source.height) * 1.08;
+  const backgroundWidth = source.width * backgroundScale;
+  const backgroundHeight = source.height * backgroundScale;
+  ctx.save();
+  ctx.globalAlpha = .28;
+  ctx.filter = "blur(28px) brightness(.52) saturate(.78)";
+  ctx.drawImage(source, (outputWidth - backgroundWidth) / 2, (outputHeight - backgroundHeight) / 2, backgroundWidth, backgroundHeight);
+  ctx.restore();
+
+  const geometry = getMotionGeometry(source.width, source.height, direction, outputWidth, outputHeight);
+  let x = (outputWidth - geometry.width) / 2;
+  let y = (outputHeight - geometry.height) / 2;
+  if (direction === "leftToRight") x = -geometry.width + progress * geometry.distance;
+  if (direction === "rightToLeft") x = outputWidth - progress * geometry.distance;
+  if (direction === "topToBottom") y = -geometry.height + progress * geometry.distance;
+  if (direction === "bottomToTop") y = outputHeight - progress * geometry.distance;
+
+  ctx.save();
+  ctx.shadowColor = "rgba(0,0,0,.58)";
+  ctx.shadowBlur = 34;
+  ctx.shadowOffsetY = 18;
+  ctx.beginPath();
+  ctx.roundRect(x, y, geometry.width, geometry.height, 10);
+  ctx.clip();
+  ctx.drawImage(source, x, y, geometry.width, geometry.height);
+  ctx.restore();
+}
+
+// Character boxes use GA 36 dimensions also demonstrated by the referenced open-source generators.
+function getGlyphBoxes(value: string, kind: PlateKind): GlyphBox[] {
+  if (REAR_KINDS.includes(kind)) {
+    return value.split("").map((char, index) => index < 2
+      ? { char, x: index === 0 ? 110 : 250, y: 15, width: 80, height: 60, row: "upper" }
+      : { char, x: 27 + (index - 2) * 80, y: 90, width: 65, height: 110, row: "lower" });
+  }
+
+  const energy = kind === "nevSmall" || kind === "nevLarge";
+  let right = 0;
+  return value.split("").map((char, index) => {
+    const width = energy && index > 0 ? 43 : 45;
+    const x = index === 0 ? 15 : right + (index === 2 ? (energy ? 34 : 34) : energy ? 9 : 12);
+    right = x + width;
+    return { char, x, y: 25, width, height: 90, row: "single" };
+  });
+}
 
 const PLATE_TYPES: { id: PlateKind; name: string; note: string; sample: string }[] = [
   { id: "blue", name: "小型汽车", note: "蓝底白字 · 7 位", sample: "京A·A2088" },
-  { id: "yellow", name: "大型汽车", note: "黄底黑字 · 7 位", sample: "沪B·58216" },
+  { id: "yellow", name: "大型汽车前牌", note: "黄底黑字 · 440×140", sample: "沪B·58216" },
+  { id: "yellowRear", name: "大型汽车后牌", note: "双行黄牌 · 440×220", sample: "沪B 58216" },
   { id: "nevSmall", name: "小型新能源", note: "渐变绿底 · 8 位", sample: "粤B·D12345" },
   { id: "nevLarge", name: "大型新能源", note: "黄绿双拼 · 8 位", sample: "川A·12345F" },
   { id: "coach", name: "教练汽车", note: "黄底黑字 · 末位学", sample: "浙C·2314学" },
-  { id: "trailer", name: "挂车", note: "黄底黑字 · 末位挂", sample: "鲁Q·7253挂" },
+  { id: "trailer", name: "挂车", note: "双行黄牌 · 440×220", sample: "鲁Q 7253挂" },
   { id: "hkmo", name: "港澳入出境", note: "黑底白字 · 末位港/澳", sample: "粤Z·A88港" },
   { id: "tractor", name: "拖拉机", note: "绿底白字 · 农用机械", sample: "京01-00001" },
   { id: "field", name: "厂（场）内车辆", note: "绿底白字 · 场内专用", sample: "场内京A·00001" },
@@ -36,20 +300,21 @@ function randomSerial(length: number) {
 
 function generate(kind: PlateKind, province?: string, city?: string) {
   const p = kind === "hkmo" ? "粤" : province || randomFrom(PROVINCES);
-  const c = kind === "hkmo" ? "Z" : city || randomFrom(LETTERS);
+  const c = kind === "hkmo" ? "Z" : kind === "tractor" ? city || String(Math.floor(1 + Math.random() * 99)).padStart(2, "0") : city || randomFrom(LETTERS);
   if (kind === "nevSmall") return `${p}${c}${randomFrom("DABCEF")}${randomSerial(5)}`;
   if (kind === "nevLarge") return `${p}${c}${randomSerial(5)}${randomFrom("DF")}`;
   if (kind === "coach") return `${p}${c}${randomSerial(4)}学`;
   if (kind === "trailer") return `${p}${c}${randomSerial(4)}挂`;
-  if (kind === "hkmo") return `${p}${c}${randomFrom(LETTERS)}${Math.floor(10 + Math.random() * 90)}${randomFrom("港澳")}`;
+  if (kind === "hkmo") return `${p}${c}${randomFrom(LETTERS)}${Math.floor(100 + Math.random() * 900)}${randomFrom("港澳")}`;
   if (kind === "port") return `${p}${c}${randomSerial(4)}`;
   if (kind === "tempTrial") return `${p}${c}${randomSerial(4)}试`;
   if (kind === "tempOversize") return `${p}${c}${randomSerial(4)}超`;
+  if (kind === "tractor") return `${p}${c}${Array.from({ length: 5 }, () => randomFrom("0123456789")).join("")}`;
   return `${p}${c}${randomSerial(5)}`;
 }
 
 function formatPlate(value: string, kind: PlateKind = "blue") {
-  if (kind === "tractor") return `${value.slice(0, 2)}-${value.slice(2)}`;
+  if (kind === "tractor") return `${value.slice(0, 3)}-${value.slice(3)}`;
   if (kind === "field") return `场内${value.slice(0, 2)}·${value.slice(2)}`;
   if (kind === "port") return `连港·${value.slice(1)}`;
   if (kind === "aviation") return `民航${value.slice(1, 2)}·${value.slice(2)}`;
@@ -63,11 +328,66 @@ export default function Home() {
   const [city, setCity] = useState("A");
   const [plate, setPlate] = useState("京AA2088");
   const [notice, setNotice] = useState("");
+  const [expiryDate] = useState(() => new Date(Date.now() + 30 * 86400000).toISOString().slice(0, 10));
   const noticeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const previewCanvas = useRef<HTMLCanvasElement>(null);
+  const vehicleCanvas = useRef<HTMLCanvasElement>(null);
+  const motionCanvas = useRef<HTMLCanvasElement>(null);
+  const motionPreviewFrame = useRef<number | null>(null);
+  const motionRecordFrame = useRef<number | null>(null);
+  const activeRecorder = useRef<MediaRecorder | null>(null);
+  const recordedMotionObjectUrl = useRef<string | null>(null);
+  const vehicleImage = useRef<HTMLImageElement | null>(null);
+  const vehicleObjectUrl = useRef<string | null>(null);
+  const isDraggingPlate = useRef(false);
+  const [vehicleReady, setVehicleReady] = useState(false);
+  const [vehicleAspect, setVehicleAspect] = useState(16 / 9);
+  const [vehicleName, setVehicleName] = useState("");
+  const [vehiclePlacement, setVehiclePlacement] = useState<VehiclePlacement>(DEFAULT_VEHICLE_PLACEMENT);
+  const [detectedPlacement, setDetectedPlacement] = useState<VehiclePlacement>(DEFAULT_VEHICLE_PLACEMENT);
+  const [detectionStatus, setDetectionStatus] = useState("等待车辆图片");
+  const [motionDirection, setMotionDirection] = useState<MotionDirection>("leftToRight");
+  const [motionSpeed, setMotionSpeed] = useState(220);
+  const [motionResolution, setMotionResolution] = useState<MotionResolutionId>("720p");
+  const [motionWidth, setMotionWidth] = useState(1280);
+  const [motionHeight, setMotionHeight] = useState(720);
+  const [isRecordingMotion, setIsRecordingMotion] = useState(false);
+  const [motionProgress, setMotionProgress] = useState(0);
+  const [recordedMotion, setRecordedMotion] = useState<{ url: string; extension: string } | null>(null);
 
   const current = useMemo(() => PLATE_TYPES.find((item) => item.id === kind)!, [kind]);
+  const spec = PLATE_SPECS[kind];
+  const glyphBoxes = useMemo(() => getGlyphBoxes(plate, kind), [plate, kind]);
   const serialLength = kind === "nevSmall" || kind === "nevLarge" ? 6 : kind === "port" ? 4 : 5;
-  const serial = plate.slice(2);
+  const prefixLength = kind === "tractor" ? 3 : 2;
+  const serial = plate.slice(prefixLength);
+  const motionDuration = useMemo(() => vehicleReady
+    ? getMotionGeometry(vehicleAspect, 1, motionDirection, motionWidth, motionHeight).distance / motionSpeed
+    : 0, [motionDirection, motionHeight, motionSpeed, motionWidth, vehicleAspect, vehicleReady]);
+
+  const clearRecordedMotion = () => {
+    if (recordedMotionObjectUrl.current) URL.revokeObjectURL(recordedMotionObjectUrl.current);
+    recordedMotionObjectUrl.current = null;
+    setRecordedMotion(null);
+  };
+
+  const chooseMotionResolution = (value: MotionResolutionId) => {
+    clearRecordedMotion();
+    setMotionResolution(value);
+    if (value === "custom") return;
+    const resolution = MOTION_RESOLUTIONS.find((item) => item.id === value)!;
+    setMotionWidth(resolution.width);
+    setMotionHeight(resolution.height);
+  };
+
+  const setCustomMotionSize = (axis: "width" | "height", value: number) => {
+    clearRecordedMotion();
+    const limited = axis === "width"
+      ? Math.min(3840, Math.max(320, value || 320))
+      : Math.min(2160, Math.max(240, value || 240));
+    if (axis === "width") setMotionWidth(limited);
+    else setMotionHeight(limited);
+  };
 
   const toast = (message: string) => {
     setNotice(message);
@@ -77,7 +397,7 @@ export default function Home() {
 
   const chooseKind = (next: PlateKind) => {
     const p = next === "hkmo" ? "粤" : province;
-    const c = next === "hkmo" ? "Z" : city;
+    const c = next === "hkmo" ? "Z" : next === "tractor" ? "01" : city.length === 1 ? city : "A";
     setKind(next);
     setProvince(p);
     setCity(c);
@@ -93,23 +413,22 @@ export default function Home() {
   const randomize = () => {
     const next = generate(kind);
     setProvince(next[0]);
-    setCity(next[1]);
+    setCity(kind === "tractor" ? next.slice(1, 3) : next[1]);
     setPlate(next);
     toast("已生成一组新号码");
   };
 
-  const download = () => {
-    const scale = 3;
-    const width = 880;
-    const height = kind === "hkmo" ? 280 : 280;
-    const canvas = document.createElement("canvas");
+  const renderPlate = useCallback((canvas: HTMLCanvasElement, scale: number) => {
+    const isTemp = TEMP_KINDS.includes(kind);
+    const isRear = REAR_KINDS.includes(kind);
+    const width = spec.width * 2;
+    const height = spec.height * 2;
     canvas.width = width * scale;
     canvas.height = height * scale;
     const ctx = canvas.getContext("2d")!;
     ctx.scale(scale, scale);
     const isGreen = kind === "tractor" || kind === "field" || kind === "port" || kind === "aviation";
-    const isTemp = kind.startsWith("temp");
-    const palette = kind === "blue" ? ["#0964d8", "#023c9c"] : kind === "hkmo" ? ["#17191b", "#050606"] : isGreen ? ["#15904d", "#075d31"] : isTemp ? ["#f8f5e8", "#e7e7db"] : kind === "nevSmall" ? ["#eaffed", "#63d986"] : kind === "nevLarge" ? ["#f4df25", "#63cf78"] : ["#ffd91f", "#e7a900"];
+    const palette = kind === "blue" ? ["#001b7a", "#001b7a"] : kind === "hkmo" ? ["#000000", "#000000"] : isGreen ? ["#138447", "#075d31"] : isTemp ? ["#f8f5e8", "#e7e7db"] : kind === "nevSmall" ? ["#eef9ef", "#57cf78"] : kind === "nevLarge" ? ["#ffbe00", "#58ca73"] : ["#ffbe00", "#ffbe00"];
     const gradient = kind === "nevLarge"
       ? ctx.createLinearGradient(0, 0, width, 0)
       : ctx.createLinearGradient(0, 0, width, height);
@@ -120,23 +439,153 @@ export default function Home() {
     }
     gradient.addColorStop(1, palette[1]);
     ctx.fillStyle = gradient;
-    ctx.roundRect(2, 2, width - 4, height - 4, 22);
+    ctx.roundRect(2, 2, width - 4, height - 4, isTemp ? 4 : 20);
     ctx.fill();
+    if (!isTemp) {
+      ctx.globalAlpha = .1;
+      ctx.fillStyle = kind === "hkmo" ? "#ffffff" : "#eef8ef";
+      for (let y = 10; y < height; y += 10) {
+        for (let x = 10; x < width; x += 10) {
+          ctx.beginPath(); ctx.arc(x, y, .8, 0, Math.PI * 2); ctx.fill();
+        }
+      }
+      ctx.globalAlpha = 1;
+    }
+    if (isTemp) {
+      ctx.globalAlpha = .1;
+      ctx.strokeStyle = kind === "temp" || kind === "tempEntry" ? "#1c57a4" : "#9c2721";
+      ctx.lineWidth = 1;
+      for (let x = -height; x < width; x += 22) {
+        ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x + height, height); ctx.stroke();
+      }
+      ctx.globalAlpha = 1;
+    }
     ctx.strokeStyle = kind === "blue" || kind === "hkmo" || isGreen ? "#f8fbff" : isTemp ? (kind === "temp" || kind === "tempEntry" ? "#174a9c" : "#9c2721") : "#101317";
-    ctx.lineWidth = 9;
-    ctx.roundRect(14, 14, width - 28, height - 28, 15);
+    ctx.lineWidth = isTemp ? 4 : 6;
+    ctx.roundRect(isTemp ? 8 : 3, isTemp ? 8 : 3, width - (isTemp ? 16 : 6), height - (isTemp ? 16 : 6), isTemp ? 2 : 20);
     ctx.stroke();
-    ctx.fillStyle = ctx.strokeStyle;
-    [[55, 52], [825, 52], [55, 228], [825, 228]].forEach(([x, y]) => {
-      ctx.beginPath(); ctx.arc(x, y, 13, 0, Math.PI * 2); ctx.fill();
-    });
+    if (!isTemp && kind !== "field") {
+      const slotWidth = 46;
+      const slotHeight = 16;
+      const slotLeft = 192;
+      const slotTop = 17;
+      ctx.fillStyle = ctx.strokeStyle;
+      [[slotLeft, slotTop], [width - slotLeft - slotWidth, slotTop], [slotLeft, height - slotTop - slotHeight], [width - slotLeft - slotWidth, height - slotTop - slotHeight]].forEach(([x, y]) => {
+        ctx.beginPath(); ctx.roundRect(x, y, slotWidth, slotHeight, slotHeight / 2); ctx.fill();
+      });
+    }
     ctx.textAlign = "center";
     ctx.textBaseline = "middle";
-    ctx.font = `900 ${kind === "tempEntry" ? 82 : kind.startsWith("nev") ? 125 : 138}px "Arial Narrow", "Noto Sans SC", sans-serif`;
+    ctx.fillStyle = ctx.strokeStyle;
+    ctx.font = `900 ${kind === "tempEntry" ? 72 : isTemp ? 105 : kind.startsWith("nev") ? 125 : 138}px "Arial Narrow", "Noto Sans SC", sans-serif`;
     ctx.shadowColor = "rgba(0,0,0,.28)";
     ctx.shadowBlur = 2;
     ctx.shadowOffsetY = 3;
-    if (kind === "field") {
+    const glyphCache = new Map<string, HTMLCanvasElement>();
+    const getGlyphSprite = (char: string, boxWidth: number, boxHeight: number, color: string) => {
+      const cacheKey = `${char}-${boxWidth}-${boxHeight}-${color}`;
+      const cached = glyphCache.get(cacheKey);
+      if (cached) return cached;
+      const sprite = document.createElement("canvas");
+      sprite.width = boxWidth * 2;
+      sprite.height = boxHeight * 2;
+      const spriteCtx = sprite.getContext("2d", { willReadFrequently: true })!;
+      spriteCtx.fillStyle = color;
+      spriteCtx.textAlign = "center";
+      spriteCtx.textBaseline = "alphabetic";
+      // Measure the real ink bounds before scaling so strokes cannot be clipped
+      // during rasterization in either preview or export.
+      const sourceFontSize = 200;
+      spriteCtx.font = `900 ${sourceFontSize}px "Arial Narrow", "Noto Sans SC", sans-serif`;
+      const metrics = spriteCtx.measureText(char);
+      const inkWidth = Math.max(1, metrics.actualBoundingBoxLeft + metrics.actualBoundingBoxRight);
+      const inkHeight = Math.max(1, metrics.actualBoundingBoxAscent + metrics.actualBoundingBoxDescent);
+      const isHan = /[\u3400-\u9fff]/.test(char);
+      // The reference sprites fill about 94–95% of their 45px-wide cell. Latin
+      // glyphs reach roughly 96% of the 90px height; Han glyphs sit near 92%.
+      // Keep vertical scale independent so a wide glyph only compresses on X
+      // instead of making the whole character visibly shorter.
+      const targetWidthRatio = isHan ? .94 : .95;
+      const targetHeightRatio = isHan ? .92 : .96;
+      const horizontalRatio = isHan ? .52 : .88;
+      const scaleY = sprite.height * targetHeightRatio / inkHeight;
+      const scaleX = Math.min(
+        horizontalRatio * scaleY,
+        sprite.width * targetWidthRatio / inkWidth,
+      );
+      spriteCtx.save();
+      spriteCtx.translate(sprite.width / 2, sprite.height / 2);
+      spriteCtx.scale(scaleX, scaleY);
+      spriteCtx.fillText(
+        char,
+        (metrics.actualBoundingBoxLeft - metrics.actualBoundingBoxRight) / 2,
+        (metrics.actualBoundingBoxAscent - metrics.actualBoundingBoxDescent) / 2,
+      );
+      spriteCtx.restore();
+      // Convert anti-aliased browser text to a stable, sprite-like binary mask.
+      const pixels = spriteCtx.getImageData(0, 0, sprite.width, sprite.height);
+      for (let index = 3; index < pixels.data.length; index += 4) {
+        pixels.data[index] = pixels.data[index] > 72 ? 255 : 0;
+      }
+      spriteCtx.putImageData(pixels, 0, 0);
+      glyphCache.set(cacheKey, sprite);
+      return sprite;
+    };
+    const drawGlyphs = () => {
+      const glyphColor = kind === "blue" || kind === "hkmo" ? "#f8fbff" : "#101214";
+      ctx.fillStyle = glyphColor;
+      ctx.imageSmoothingEnabled = false;
+      glyphBoxes.forEach((box) => {
+        const sprite = getGlyphSprite(box.char, box.width, box.height, glyphColor);
+        ctx.drawImage(sprite, box.x * 2, box.y * 2, box.width * 2, box.height * 2);
+      });
+      if (!isRear && kind !== "nevSmall" && kind !== "nevLarge") {
+        ctx.beginPath(); ctx.arc(134 * 2, 70 * 2, 9, 0, Math.PI * 2); ctx.fill();
+      }
+      if (kind === "nevSmall" || kind === "nevLarge") {
+        const mark = ctx.createLinearGradient(246, 112, 282, 168);
+        mark.addColorStop(0, "#29a9df"); mark.addColorStop(1, "#65bb55");
+        ctx.fillStyle = mark; ctx.beginPath(); ctx.ellipse(264, 140, 18, 27, 0, 0, Math.PI * 2); ctx.fill();
+        ctx.strokeStyle = "#fff"; ctx.lineWidth = 3;
+        [-8, 0, 8].forEach((dy) => { ctx.beginPath(); ctx.moveTo(254, 140 + dy); ctx.lineTo(274, 140 + dy); ctx.stroke(); });
+      }
+    };
+    if (isTemp) {
+      ctx.fillStyle = ctx.strokeStyle;
+      ctx.shadowColor = "transparent";
+      const drawFittedText = (text: string, y: number, maxFontSize: number, minFontSize: number, weight: number, family: string) => {
+        ctx.font = `${weight} ${maxFontSize}px ${family}`;
+        const measuredWidth = Math.max(1, ctx.measureText(text).width);
+        const availableWidth = width - TEMP_LAYOUT.horizontalPadding * 2;
+        const fittedSize = Math.max(minFontSize, Math.min(maxFontSize, maxFontSize * availableWidth / measuredWidth));
+        ctx.font = `${weight} ${fittedSize}px ${family}`;
+        ctx.fillText(text, width / 2, y, availableWidth);
+      };
+      const sans = '"Noto Sans SC", sans-serif';
+      const plateFont = '"Arial Narrow", "Noto Sans SC", sans-serif';
+      drawFittedText(
+        kind === "tempEntry" ? "临时入境机动车号牌" : "机动车临时行驶车号牌",
+        TEMP_LAYOUT.titleY,
+        28,
+        22,
+        700,
+        sans,
+      );
+      // The title already identifies an entry plate; repeating "临时入境" in
+      // the number line previously pushed both sides beyond the paper canvas.
+      drawFittedText(formatPlate(plate), TEMP_LAYOUT.numberY, 82, 58, 900, plateFont);
+      drawFittedText(`有效期至  ${expiryDate}`, TEMP_LAYOUT.expiryY, 20, 16, 600, sans);
+      drawFittedText(
+        kind === "tempEntry" ? "核准路线：登记区域内道路" : "请粘贴于前风窗玻璃内侧",
+        TEMP_LAYOUT.noteY,
+        16,
+        13,
+        500,
+        sans,
+      );
+    } else if (GLYPH_KINDS.includes(kind)) {
+      drawGlyphs();
+    } else if (kind === "field") {
       ctx.fillStyle = "#ffe51f";
       ctx.font = '900 58px "Noto Sans SC", sans-serif';
       ctx.fillText("场", 72, 106);
@@ -148,6 +597,292 @@ export default function Home() {
       ctx.fillText(formatPlate(plate, kind), width / 2, height / 2 + 5);
     }
     ctx.shadowColor = "transparent";
+  }, [expiryDate, glyphBoxes, kind, plate, spec.height, spec.width]);
+
+  useEffect(() => {
+    if (previewCanvas.current) renderPlate(previewCanvas.current, 2);
+  }, [renderPlate]);
+
+  const renderVehicleComposite = useCallback(() => {
+    const image = vehicleImage.current;
+    const canvas = vehicleCanvas.current;
+    if (!image || !canvas) return;
+    const outputScale = Math.min(1, 4096 / Math.max(image.naturalWidth, image.naturalHeight));
+    canvas.width = Math.max(1, Math.round(image.naturalWidth * outputScale));
+    canvas.height = Math.max(1, Math.round(image.naturalHeight * outputScale));
+    const ctx = canvas.getContext("2d")!;
+    ctx.imageSmoothingEnabled = true;
+    ctx.imageSmoothingQuality = "high";
+    ctx.drawImage(image, 0, 0, canvas.width, canvas.height);
+
+    const plateCanvas = document.createElement("canvas");
+    renderPlate(plateCanvas, 2);
+    const targetWidth = canvas.width * vehiclePlacement.width;
+    const targetHeight = canvas.height * vehiclePlacement.height;
+    ctx.save();
+    ctx.fillStyle = "rgba(5,8,10,.42)";
+    ctx.shadowColor = "rgba(0,0,0,.5)";
+    ctx.shadowBlur = Math.max(2, targetHeight * .06);
+    ctx.shadowOffsetY = Math.max(1, targetHeight * .035);
+    ctx.filter = `brightness(${vehiclePlacement.brightness}) contrast(.96) saturate(.94)`;
+    ctx.globalAlpha = .985;
+    if (vehiclePlacement.corners) {
+      const corners = vehiclePlacement.corners.map((point) => ({ x: point.x * canvas.width, y: point.y * canvas.height })) as [CanvasPoint, CanvasPoint, CanvasPoint, CanvasPoint];
+      const center = corners.reduce((sum, point) => ({ x: sum.x + point.x / 4, y: sum.y + point.y / 4 }), { x: 0, y: 0 });
+      ctx.beginPath();
+      ctx.moveTo(center.x + (corners[0].x - center.x) * 1.035, center.y + (corners[0].y - center.y) * 1.08);
+      corners.slice(1).forEach((point) => ctx.lineTo(center.x + (point.x - center.x) * 1.035, center.y + (point.y - center.y) * 1.08));
+      ctx.closePath();
+      ctx.fill();
+      drawPerspectivePlate(ctx, plateCanvas, vehiclePlacement.corners, canvas.width, canvas.height);
+    } else {
+      ctx.translate(canvas.width * vehiclePlacement.x, canvas.height * vehiclePlacement.y);
+      ctx.rotate(vehiclePlacement.rotation * Math.PI / 180);
+      ctx.beginPath();
+      ctx.roundRect(-targetWidth * .515, -targetHeight * .56, targetWidth * 1.03, targetHeight * 1.12, Math.max(2, targetHeight * .08));
+      ctx.fill();
+      ctx.drawImage(plateCanvas, -targetWidth / 2, -targetHeight / 2, targetWidth, targetHeight);
+    }
+    ctx.restore();
+  }, [renderPlate, vehiclePlacement]);
+
+  useEffect(() => {
+    if (vehicleReady) renderVehicleComposite();
+  }, [renderVehicleComposite, vehicleReady]);
+
+  useEffect(() => {
+    const canvas = motionCanvas.current;
+    const source = vehicleCanvas.current;
+    if (!vehicleReady || !canvas || !source || isRecordingMotion) return;
+    const startedAt = performance.now();
+    const animate = (now: number) => {
+      const geometry = getMotionGeometry(source.width, source.height, motionDirection, motionWidth, motionHeight);
+      const progress = ((now - startedAt) / 1000 * motionSpeed / geometry.distance) % 1;
+      drawVehicleMotionFrame(canvas, source, motionDirection, progress, motionWidth, motionHeight);
+      motionPreviewFrame.current = requestAnimationFrame(animate);
+    };
+    motionPreviewFrame.current = requestAnimationFrame(animate);
+    return () => {
+      if (motionPreviewFrame.current !== null) cancelAnimationFrame(motionPreviewFrame.current);
+      motionPreviewFrame.current = null;
+    };
+  }, [isRecordingMotion, kind, motionDirection, motionHeight, motionSpeed, motionWidth, plate, vehiclePlacement, vehicleReady]);
+
+  useEffect(() => () => {
+    if (vehicleObjectUrl.current) URL.revokeObjectURL(vehicleObjectUrl.current);
+    if (motionPreviewFrame.current !== null) cancelAnimationFrame(motionPreviewFrame.current);
+    if (motionRecordFrame.current !== null) cancelAnimationFrame(motionRecordFrame.current);
+    if (activeRecorder.current?.state === "recording") activeRecorder.current.stop();
+    if (recordedMotionObjectUrl.current) URL.revokeObjectURL(recordedMotionObjectUrl.current);
+  }, []);
+
+  const runVehicleDetection = async (source = vehicleImage.current) => {
+    if (!source) {
+      toast("请先上传车辆正面图片");
+      return;
+    }
+    setDetectionStatus("正在加载 AI 模型并识别车牌四角…");
+    await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+    try {
+      const detected = await detectPlateWithYuNet(source);
+      if (detected) {
+        setDetectedPlacement(detected.placement);
+        setVehiclePlacement(detected.placement);
+        setDetectionStatus(`AI 四角识别完成 · 置信度 ${Math.round(detected.confidence * 100)}%`);
+        toast("已识别车牌四角并完成透视覆盖");
+        return;
+      }
+    } catch (error) {
+      console.warn("LPD-YuNet detection failed, using local fallback.", error);
+    }
+    setDetectionStatus("AI 模型未找到车牌 · 正在使用本地扫描…");
+    await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+    const detected = detectVehiclePlate(source);
+    if (detected) {
+      setDetectedPlacement(detected.placement);
+      setVehiclePlacement(detected.placement);
+      setDetectionStatus(`本地扫描已定位 · 置信度 ${Math.round(detected.confidence * 100)}%`);
+      toast("AI 识别不可用，已用本地扫描完成覆盖");
+      return;
+    }
+    const fallbackWidth = .26;
+    const fallback = {
+      ...DEFAULT_VEHICLE_PLACEMENT,
+      width: fallbackWidth,
+      height: Math.min(.18, Math.max(.04, fallbackWidth * source.naturalWidth / source.naturalHeight * spec.height / spec.width)),
+    };
+    setDetectedPlacement(fallback);
+    setVehiclePlacement(fallback);
+    setDetectionStatus("未可靠识别 · 已使用默认位置");
+    toast("未可靠识别车牌，请拖动微调");
+  };
+
+  const uploadVehicle = (event: ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+    if (!file.type.startsWith("image/")) {
+      toast("请选择 JPG、PNG 或 WebP 车辆图片");
+      event.target.value = "";
+      return;
+    }
+    const nextUrl = URL.createObjectURL(file);
+    const image = new Image();
+    image.onload = () => {
+      if (vehicleObjectUrl.current) URL.revokeObjectURL(vehicleObjectUrl.current);
+      vehicleObjectUrl.current = nextUrl;
+      vehicleImage.current = image;
+      setVehicleAspect(image.naturalWidth / image.naturalHeight);
+      setVehicleName(file.name);
+      setVehicleReady(true);
+      runVehicleDetection(image);
+    };
+    image.onerror = () => {
+      URL.revokeObjectURL(nextUrl);
+      toast("图片读取失败，请更换文件");
+    };
+    image.src = nextUrl;
+    event.target.value = "";
+  };
+
+  const moveVehiclePlate = (event: ReactPointerEvent<HTMLCanvasElement>) => {
+    if (!isDraggingPlate.current) return;
+    const rect = event.currentTarget.getBoundingClientRect();
+    const x = Math.min(.95, Math.max(.05, (event.clientX - rect.left) / rect.width));
+    const y = Math.min(.95, Math.max(.05, (event.clientY - rect.top) / rect.height));
+    setVehiclePlacement((currentPlacement) => {
+      const deltaX = x - currentPlacement.x;
+      const deltaY = y - currentPlacement.y;
+      return {
+        ...currentPlacement,
+        x,
+        y,
+        corners: currentPlacement.corners?.map((point) => ({
+          x: Math.min(.995, Math.max(.005, point.x + deltaX)),
+          y: Math.min(.995, Math.max(.005, point.y + deltaY)),
+        })) as PlateCorners | undefined,
+      };
+    });
+  };
+
+  const startMovingVehiclePlate = (event: ReactPointerEvent<HTMLCanvasElement>) => {
+    if (!vehicleReady) return;
+    isDraggingPlate.current = true;
+    event.currentTarget.setPointerCapture(event.pointerId);
+    moveVehiclePlate(event);
+  };
+
+  const stopMovingVehiclePlate = (event: ReactPointerEvent<HTMLCanvasElement>) => {
+    isDraggingPlate.current = false;
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
+  };
+
+  const setPlacementValue = (key: Exclude<keyof VehiclePlacement, "corners">, value: number) => {
+    setVehiclePlacement((currentPlacement) => ({ ...currentPlacement, [key]: value, corners: undefined }));
+  };
+
+  const downloadVehicleComposite = () => {
+    if (!vehicleReady || !vehicleCanvas.current) {
+      toast("请先上传车辆正面图片");
+      return;
+    }
+    renderVehicleComposite();
+    if (recordedMotionObjectUrl.current) {
+      URL.revokeObjectURL(recordedMotionObjectUrl.current);
+      recordedMotionObjectUrl.current = null;
+      setRecordedMotion(null);
+    }
+    const link = document.createElement("a");
+    link.download = `vehicle-${plate}.png`;
+    link.href = vehicleCanvas.current.toDataURL("image/png");
+    link.click();
+    toast("车辆合成图已导出");
+  };
+
+  const downloadMotionVideo = () => {
+    const canvas = motionCanvas.current;
+    const source = vehicleCanvas.current;
+    if (!vehicleReady || !canvas || !source) {
+      toast("请先生成车辆合成图片");
+      return;
+    }
+    const captureCanvas = canvas as HTMLCanvasElement & { captureStream?: (frameRate?: number) => MediaStream };
+    if (!captureCanvas.captureStream || typeof MediaRecorder === "undefined") {
+      toast("当前浏览器不支持视频生成，请使用最新版 Chrome、Edge 或 Safari");
+      return;
+    }
+
+    renderVehicleComposite();
+    const supportedTypes = [
+      "video/mp4;codecs=avc1.42E01E",
+      "video/webm;codecs=vp9",
+      "video/webm;codecs=vp8",
+      "video/webm",
+    ];
+    const mimeType = supportedTypes.find((type) => MediaRecorder.isTypeSupported(type)) || "";
+    const stream = captureCanvas.captureStream(30);
+    const chunks: Blob[] = [];
+    let recorder: MediaRecorder;
+    try {
+      recorder = new MediaRecorder(stream, mimeType ? { mimeType, videoBitsPerSecond: 8_000_000 } : { videoBitsPerSecond: 8_000_000 });
+    } catch {
+      stream.getTracks().forEach((track) => track.stop());
+      toast("无法启动视频编码器，请更换浏览器后重试");
+      return;
+    }
+
+    const duration = getMotionGeometry(source.width, source.height, motionDirection, motionWidth, motionHeight).distance / motionSpeed;
+    recorder.ondataavailable = (event) => { if (event.data.size) chunks.push(event.data); };
+    recorder.onerror = () => {
+      setIsRecordingMotion(false);
+      stream.getTracks().forEach((track) => track.stop());
+      toast("视频生成失败，请重试");
+    };
+    recorder.onstop = () => {
+      stream.getTracks().forEach((track) => track.stop());
+      activeRecorder.current = null;
+      setIsRecordingMotion(false);
+      setMotionProgress(0);
+      if (!chunks.length) return;
+      const finalType = recorder.mimeType || mimeType || "video/webm";
+      const extension = finalType.includes("mp4") ? "mp4" : "webm";
+      const url = URL.createObjectURL(new Blob(chunks, { type: finalType }));
+      recordedMotionObjectUrl.current = url;
+      setRecordedMotion({ url, extension });
+      const link = document.createElement("a");
+      link.download = `vehicle-motion-${plate}-${motionDirection}-${motionWidth}x${motionHeight}.${extension}`;
+      link.href = url;
+      link.click();
+      toast(`视频生成完成，可保存为 ${extension.toUpperCase()}`);
+    };
+
+    setIsRecordingMotion(true);
+    setMotionProgress(0);
+    activeRecorder.current = recorder;
+    drawVehicleMotionFrame(canvas, source, motionDirection, 0, motionWidth, motionHeight);
+    recorder.start(250);
+    const startedAt = performance.now();
+    let lastProgressUpdate = 0;
+    const recordFrame = (now: number) => {
+      const progress = Math.min(1, (now - startedAt) / 1000 / duration);
+      drawVehicleMotionFrame(canvas, source, motionDirection, progress, motionWidth, motionHeight);
+      if (now - lastProgressUpdate > 100) {
+        setMotionProgress(progress);
+        lastProgressUpdate = now;
+      }
+      if (progress < 1) {
+        motionRecordFrame.current = requestAnimationFrame(recordFrame);
+      } else {
+        motionRecordFrame.current = null;
+        window.setTimeout(() => { if (recorder.state === "recording") recorder.stop(); }, 120);
+      }
+    };
+    motionRecordFrame.current = requestAnimationFrame(recordFrame);
+  };
+
+  const download = () => {
+    const canvas = document.createElement("canvas");
+    // Logical artwork uses 2 px/mm; 6× export yields about 305 dpi at physical size.
+    renderPlate(canvas, 6);
     const link = document.createElement("a");
     link.download = `plate-${plate}.png`;
     link.href = canvas.toDataURL("image/png");
@@ -159,21 +894,14 @@ export default function Home() {
     <main>
       <nav className="topbar">
         <a className="brand" href="#top" aria-label="牌研所首页"><span className="brand-mark">牌</span><span>牌研所<small>PLATE LAB</small></span></a>
-        <div className="nav-right"><span className="status"><i /> 规则库 GA 36—2018</span><a href="https://zh.wikipedia.org/wiki/中华人民共和国机动车号牌" target="_blank" rel="noreferrer">参考文档 ↗</a></div>
+        <div className="nav-right"><span className="status"><i /> 规则库 GA 36—2018</span><a href="#vehicle-studio">车辆合成</a><a href="#motion-studio">动画视频</a><a href="https://baike.baidu.com/item/中华人民共和国机动车号牌/65692407" target="_blank" rel="noreferrer">参考文档 ↗</a></div>
       </nav>
 
       <section className="workspace" id="top">
         <div className="stage">
-          <div className="stage-heading"><span>实时预览</span><span className="scale">440 × 140 mm · 1:2</span></div>
+          <div className="stage-heading"><span>实时预览</span><span className="scale">{spec.width} × {spec.height} mm · 标准比例</span></div>
           <div className="plate-rig">
-            <div className={`plate plate-${kind}`} aria-label={`车牌预览 ${formatPlate(plate, kind)}`}>
-              <span className="bolt b1"/><span className="bolt b2"/><span className="bolt b3"/><span className="bolt b4"/>
-              {kind === "field" ? (
-                <div className="plate-number field-number"><span className="field-tag">场<br/>内</span><span>{plate.slice(0, 2)}·{plate.slice(2)}</span></div>
-              ) : (
-                <div className="plate-number"><span>{formatPlate(plate, kind)}</span></div>
-              )}
-            </div>
+            <canvas ref={previewCanvas} className={`plate-preview ${TEMP_KINDS.includes(kind) ? "plate-preview-paper" : ""} ${kind.startsWith("nev") ? "plate-preview-energy" : ""} ${REAR_KINDS.includes(kind) ? "plate-preview-rear" : ""}`} aria-label={`车牌预览 ${formatPlate(plate, kind)}`} role="img" />
             <div className="bench-line" />
           </div>
           <div className="plate-meta"><div><b>{current.name}</b><span>{current.note}</span></div><div className="compliance"><i>✓</i><span>格式检查通过<small>字符数与类型匹配</small></span></div></div>
@@ -191,7 +919,7 @@ export default function Home() {
             <div className="section-row"><span className="section-label">指定生成</span><button className="dice" onClick={randomize}>⌁ 随机填充</button></div>
             <div className="fields">
               <label><span>省份</span><select value={province} disabled={kind === "hkmo"} onChange={(e) => updateParts(e.target.value, city)}>{PROVINCES.map((p) => <option key={p}>{p}</option>)}</select></label>
-              <label><span>城市代码</span><select value={city} disabled={kind === "hkmo"} onChange={(e) => updateParts(province, e.target.value)}>{[...LETTERS].map((l) => <option key={l}>{l}</option>)}</select></label>
+              <label><span>{kind === "tractor" ? "县市代码" : "城市代码"}</span><select value={city} disabled={kind === "hkmo"} onChange={(e) => updateParts(province, e.target.value)}>{kind === "tractor" ? Array.from({ length: 99 }, (_, i) => String(i + 1).padStart(2, "0")).map((l) => <option key={l}>{l}</option>) : [...LETTERS].map((l) => <option key={l}>{l}</option>)}</select></label>
               <label className="serial-field"><span>号码段</span><input value={serial} maxLength={serialLength} onChange={(e) => updateParts(province, city, e.target.value.toUpperCase().replace(/[^A-Z0-9学挂港澳试超]/g, ""))}/><small>{serial.length}/{serialLength}</small></label>
             </div>
           </section>
@@ -200,10 +928,120 @@ export default function Home() {
         </aside>
       </section>
 
+      <section className="vehicle-studio" id="vehicle-studio">
+        <div className="vehicle-studio-heading">
+          <div><span className="eyebrow">车辆图片合成</span><h2>把当前车牌安装到车辆正面图</h2></div>
+          <p>图片只在本机浏览器处理。AI 自动识别原车牌四角、尺寸与倾斜透视并完成覆盖，也可继续拖动微调。</p>
+        </div>
+        <div className="vehicle-studio-grid">
+          <div className={`vehicle-photo-stage ${vehicleReady ? "has-image" : ""}`}>
+            {vehicleReady ? (
+              <canvas
+                ref={vehicleCanvas}
+                className="vehicle-canvas"
+                aria-label={`车辆合成预览，车牌 ${formatPlate(plate, kind)}`}
+                role="img"
+                onPointerDown={startMovingVehiclePlate}
+                onPointerMove={moveVehiclePlate}
+                onPointerUp={stopMovingVehiclePlate}
+                onPointerCancel={stopMovingVehiclePlate}
+              />
+            ) : (
+              <label className="vehicle-empty">
+                <span>＋</span>
+                <b>上传车辆正面图片</b>
+                <small>支持 JPG、PNG、WebP · AI 自动识别车牌四角和尺寸</small>
+                <input type="file" accept="image/jpeg,image/png,image/webp" onChange={uploadVehicle} />
+              </label>
+            )}
+          </div>
+          <aside className="vehicle-tools">
+            <div className="vehicle-tool-head"><span>定位控制</span><small>{vehicleReady ? vehicleName : "等待车辆图片"}</small></div>
+            <div className="vehicle-detection-status"><i className={detectionStatus.includes("完成") || detectionStatus.includes("已定位") ? "success" : ""} />{detectionStatus}</div>
+            <div className="vehicle-detection-actions">
+              <label className="vehicle-upload-button">选择车辆图片<input type="file" accept="image/jpeg,image/png,image/webp" onChange={uploadVehicle} /></label>
+              <button disabled={!vehicleReady} onClick={() => runVehicleDetection()}>重新识别</button>
+            </div>
+            <div className="vehicle-range-list">
+              <label><span>水平位置 <i>{Math.round(vehiclePlacement.x * 100)}%</i></span><input type="range" min="5" max="95" value={vehiclePlacement.x * 100} disabled={!vehicleReady} onChange={(event) => setPlacementValue("x", Number(event.target.value) / 100)} /></label>
+              <label><span>垂直位置 <i>{Math.round(vehiclePlacement.y * 100)}%</i></span><input type="range" min="5" max="95" value={vehiclePlacement.y * 100} disabled={!vehicleReady} onChange={(event) => setPlacementValue("y", Number(event.target.value) / 100)} /></label>
+              <label><span>车牌宽度 <i>{Math.round(vehiclePlacement.width * 100)}%</i></span><input type="range" min="10" max="60" value={vehiclePlacement.width * 100} disabled={!vehicleReady} onChange={(event) => setPlacementValue("width", Number(event.target.value) / 100)} /></label>
+              <label><span>车牌高度 <i>{Math.round(vehiclePlacement.height * 100)}%</i></span><input type="range" min="3" max="25" step="0.5" value={vehiclePlacement.height * 100} disabled={!vehicleReady} onChange={(event) => setPlacementValue("height", Number(event.target.value) / 100)} /></label>
+              <label><span>旋转角度 <i>{vehiclePlacement.rotation.toFixed(1)}°</i></span><input type="range" min="-15" max="15" step="0.5" value={vehiclePlacement.rotation} disabled={!vehicleReady} onChange={(event) => setPlacementValue("rotation", Number(event.target.value))} /></label>
+            </div>
+            <div className="vehicle-tool-actions">
+              <button disabled={!vehicleReady} onClick={() => setVehiclePlacement(detectedPlacement)}>恢复识别</button>
+              <button className="vehicle-export" disabled={!vehicleReady} onClick={downloadVehicleComposite}>↓ 导出车辆图片</button>
+            </div>
+            <p>优先使用 OpenCV LPD-YuNet 中国车牌模型定位四个角点，自动匹配透视、尺寸和现场亮度；模型不可用时会切换本地扫描。拖动位置后仍保留透视，调整尺寸或角度则进入手动矩形模式。</p>
+          </aside>
+        </div>
+      </section>
+
+      <section className="motion-studio" id="motion-studio">
+        <div className="vehicle-studio-heading">
+          <div><span className="eyebrow">车辆平移动画</span><h2>让生成的车辆图片穿过画面</h2></div>
+          <p>选择分辨率、移动方向和速度，实时预览与最终视频使用同一套 30 FPS 渲染逻辑。生成完成后视频会自动保存。</p>
+        </div>
+        <div className="motion-studio-grid">
+          <div className={`motion-stage ${vehicleReady ? "has-image" : ""}`}>
+            <canvas ref={motionCanvas} className="motion-canvas" aria-label="车辆平移动画预览" role="img" />
+            {!vehicleReady && <div className="motion-placeholder"><span>▶</span><b>请先上传车辆图片并完成车牌合成</b><small>合成结果会自动成为动画素材</small></div>}
+            {isRecordingMotion && <div className="motion-recording"><i /> 正在生成视频 {Math.round(motionProgress * 100)}%</div>}
+          </div>
+          <aside className="motion-tools">
+            <div className="vehicle-tool-head"><span>动画控制</span><small>{motionWidth}×{motionHeight} · 30 FPS</small></div>
+            <label className="motion-resolution">
+              <span className="motion-label">视频分辨率</span>
+              <select value={motionResolution} disabled={isRecordingMotion} onChange={(event) => chooseMotionResolution(event.target.value as MotionResolutionId)}>
+                {MOTION_RESOLUTIONS.map((resolution) => <option key={resolution.id} value={resolution.id}>{resolution.name}</option>)}
+                <option value="custom">自定义宽高</option>
+              </select>
+            </label>
+            {motionResolution === "custom" && (
+              <div className="motion-custom-size">
+                <label><span>宽度</span><input type="number" min="320" max="3840" step="2" value={motionWidth} disabled={isRecordingMotion} onChange={(event) => setCustomMotionSize("width", Number(event.target.value))} /></label>
+                <i>×</i>
+                <label><span>高度</span><input type="number" min="240" max="2160" step="2" value={motionHeight} disabled={isRecordingMotion} onChange={(event) => setCustomMotionSize("height", Number(event.target.value))} /></label>
+              </div>
+            )}
+            <span className="motion-label">移动方向</span>
+            <div className="motion-directions">
+              {MOTION_DIRECTIONS.map((direction) => (
+                <button
+                  key={direction.id}
+                  className={motionDirection === direction.id ? "active" : ""}
+                  disabled={isRecordingMotion}
+                  onClick={() => { clearRecordedMotion(); setMotionDirection(direction.id); }}
+                ><i>{direction.arrow}</i>{direction.name}</button>
+              ))}
+            </div>
+            <label className="motion-speed">
+              <span>移动速度 <i>{motionSpeed} 像素/秒</i></span>
+              <input type="range" min="80" max="500" step="20" value={motionSpeed} disabled={isRecordingMotion} onChange={(event) => { clearRecordedMotion(); setMotionSpeed(Number(event.target.value)); }} />
+              <small><b>慢速</b><b>快速</b></small>
+            </label>
+            <div className="motion-summary">
+              <span>预计视频时长<b>{motionDuration ? `${motionDuration.toFixed(1)} 秒` : "—"}</b></span>
+              <span>输出规格<b>{motionWidth}×{motionHeight} · 30 FPS</b></span>
+            </div>
+            <button className="motion-export" disabled={!vehicleReady || isRecordingMotion} onClick={downloadMotionVideo}>
+              {isRecordingMotion ? `正在生成 ${Math.round(motionProgress * 100)}%` : recordedMotion ? "● 重新生成视频" : "● 生成并保存视频"}
+            </button>
+            {recordedMotion && (
+              <a className="motion-download" href={recordedMotion.url} download={`vehicle-motion-${plate}-${motionDirection}-${motionWidth}x${motionHeight}.${recordedMotion.extension}`}>
+                ↓ 保存已生成视频（{recordedMotion.extension.toUpperCase()}）
+              </a>
+            )}
+            <p>视频格式由浏览器自动选择：支持 H.264 时保存 MP4，否则保存兼容性更好的 WebM。图片与视频均只在本机生成。</p>
+          </aside>
+        </div>
+      </section>
+
       <section className="info-strip">
         <div><span className="eyebrow">编码结构</span><strong><i>省</i><i>发牌机关</i><i>序号</i></strong><p>省级简称 + 地市字母代码 + 五位或六位序号</p></div>
         <div><span className="eyebrow">生成规则</span><strong className="rule-icons"><i>I</i><i>O</i><span>自动排除易混淆字母</span></strong><p>普通序号不使用 I、O，降低机器识别与肉眼辨识歧义</p></div>
-        <div><span className="eyebrow">视觉工艺</span><strong className="material">反光膜 <i/> 压印边框 <i/> 铆钉</strong><p>用光泽、颗粒与压印阴影模拟真实号牌材质</p></div>
+        <div><span className="eyebrow">视觉工艺</span><strong className="material">反光膜 <i/> 压印边框 <i/> 长圆标记</strong><p>用标准尺寸、固定字位与轻微颗粒模拟真实号牌材质</p></div>
       </section>
       <footer><span>牌研所 · 中国机动车号牌样式生成工具</span><span>依据公开资料制作 · 非官方服务</span></footer>
       {notice && <div className="toast">✓ {notice}</div>}
