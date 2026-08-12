@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent, type PointerEvent as ReactPointerEvent } from "react";
 
 const PROVINCES = ["京", "津", "沪", "渝", "冀", "豫", "云", "辽", "黑", "湘", "皖", "鲁", "新", "苏", "浙", "赣", "鄂", "桂", "甘", "晋", "蒙", "陕", "吉", "闽", "贵", "粤", "青", "藏", "川", "宁", "琼"];
 const LETTERS = "ABCDEFGHJKLMNPQRSTUVWXYZ";
@@ -28,6 +28,9 @@ const TEMP_LAYOUT = {
 };
 
 type GlyphBox = { char: string; x: number; y: number; width: number; height: number; row: "single" | "upper" | "lower" };
+type VehiclePlacement = { x: number; y: number; width: number; rotation: number };
+
+const DEFAULT_VEHICLE_PLACEMENT: VehiclePlacement = { x: .5, y: .68, width: .26, rotation: 0 };
 
 // Character boxes use GA 36 dimensions also demonstrated by the referenced open-source generators.
 function getGlyphBoxes(value: string, kind: PlateKind): GlyphBox[] {
@@ -107,6 +110,13 @@ export default function Home() {
   const [expiryDate] = useState(() => new Date(Date.now() + 30 * 86400000).toISOString().slice(0, 10));
   const noticeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const previewCanvas = useRef<HTMLCanvasElement>(null);
+  const vehicleCanvas = useRef<HTMLCanvasElement>(null);
+  const vehicleImage = useRef<HTMLImageElement | null>(null);
+  const vehicleObjectUrl = useRef<string | null>(null);
+  const isDraggingPlate = useRef(false);
+  const [vehicleReady, setVehicleReady] = useState(false);
+  const [vehicleName, setVehicleName] = useState("");
+  const [vehiclePlacement, setVehiclePlacement] = useState<VehiclePlacement>(DEFAULT_VEHICLE_PLACEMENT);
 
   const current = useMemo(() => PLATE_TYPES.find((item) => item.id === kind)!, [kind]);
   const spec = PLATE_SPECS[kind];
@@ -329,6 +339,104 @@ export default function Home() {
     if (previewCanvas.current) renderPlate(previewCanvas.current, 2);
   }, [renderPlate]);
 
+  const renderVehicleComposite = useCallback(() => {
+    const image = vehicleImage.current;
+    const canvas = vehicleCanvas.current;
+    if (!image || !canvas) return;
+    const outputScale = Math.min(1, 4096 / Math.max(image.naturalWidth, image.naturalHeight));
+    canvas.width = Math.max(1, Math.round(image.naturalWidth * outputScale));
+    canvas.height = Math.max(1, Math.round(image.naturalHeight * outputScale));
+    const ctx = canvas.getContext("2d")!;
+    ctx.imageSmoothingEnabled = true;
+    ctx.imageSmoothingQuality = "high";
+    ctx.drawImage(image, 0, 0, canvas.width, canvas.height);
+
+    const plateCanvas = document.createElement("canvas");
+    renderPlate(plateCanvas, 2);
+    const targetWidth = canvas.width * vehiclePlacement.width;
+    const targetHeight = targetWidth * spec.height / spec.width;
+    ctx.save();
+    ctx.translate(canvas.width * vehiclePlacement.x, canvas.height * vehiclePlacement.y);
+    ctx.rotate(vehiclePlacement.rotation * Math.PI / 180);
+    ctx.shadowColor = "rgba(0,0,0,.5)";
+    ctx.shadowBlur = Math.max(2, targetHeight * .06);
+    ctx.shadowOffsetY = Math.max(1, targetHeight * .035);
+    ctx.drawImage(plateCanvas, -targetWidth / 2, -targetHeight / 2, targetWidth, targetHeight);
+    ctx.restore();
+  }, [renderPlate, spec.height, spec.width, vehiclePlacement]);
+
+  useEffect(() => {
+    if (vehicleReady) renderVehicleComposite();
+  }, [renderVehicleComposite, vehicleReady]);
+
+  useEffect(() => () => {
+    if (vehicleObjectUrl.current) URL.revokeObjectURL(vehicleObjectUrl.current);
+  }, []);
+
+  const uploadVehicle = (event: ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+    if (!file.type.startsWith("image/")) {
+      toast("请选择 JPG、PNG 或 WebP 车辆图片");
+      event.target.value = "";
+      return;
+    }
+    const nextUrl = URL.createObjectURL(file);
+    const image = new Image();
+    image.onload = () => {
+      if (vehicleObjectUrl.current) URL.revokeObjectURL(vehicleObjectUrl.current);
+      vehicleObjectUrl.current = nextUrl;
+      vehicleImage.current = image;
+      setVehicleName(file.name);
+      setVehiclePlacement(DEFAULT_VEHICLE_PLACEMENT);
+      setVehicleReady(true);
+      toast("车辆图片已载入，可拖动车牌定位");
+    };
+    image.onerror = () => {
+      URL.revokeObjectURL(nextUrl);
+      toast("图片读取失败，请更换文件");
+    };
+    image.src = nextUrl;
+    event.target.value = "";
+  };
+
+  const moveVehiclePlate = (event: ReactPointerEvent<HTMLCanvasElement>) => {
+    if (!isDraggingPlate.current) return;
+    const rect = event.currentTarget.getBoundingClientRect();
+    const x = Math.min(.95, Math.max(.05, (event.clientX - rect.left) / rect.width));
+    const y = Math.min(.95, Math.max(.05, (event.clientY - rect.top) / rect.height));
+    setVehiclePlacement((currentPlacement) => ({ ...currentPlacement, x, y }));
+  };
+
+  const startMovingVehiclePlate = (event: ReactPointerEvent<HTMLCanvasElement>) => {
+    if (!vehicleReady) return;
+    isDraggingPlate.current = true;
+    event.currentTarget.setPointerCapture(event.pointerId);
+    moveVehiclePlate(event);
+  };
+
+  const stopMovingVehiclePlate = (event: ReactPointerEvent<HTMLCanvasElement>) => {
+    isDraggingPlate.current = false;
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
+  };
+
+  const setPlacementValue = (key: keyof VehiclePlacement, value: number) => {
+    setVehiclePlacement((currentPlacement) => ({ ...currentPlacement, [key]: value }));
+  };
+
+  const downloadVehicleComposite = () => {
+    if (!vehicleReady || !vehicleCanvas.current) {
+      toast("请先上传车辆正面图片");
+      return;
+    }
+    renderVehicleComposite();
+    const link = document.createElement("a");
+    link.download = `vehicle-${plate}.png`;
+    link.href = vehicleCanvas.current.toDataURL("image/png");
+    link.click();
+    toast("车辆合成图已导出");
+  };
+
   const download = () => {
     const canvas = document.createElement("canvas");
     // Logical artwork uses 2 px/mm; 6× export yields about 305 dpi at physical size.
@@ -344,7 +452,7 @@ export default function Home() {
     <main>
       <nav className="topbar">
         <a className="brand" href="#top" aria-label="牌研所首页"><span className="brand-mark">牌</span><span>牌研所<small>PLATE LAB</small></span></a>
-        <div className="nav-right"><span className="status"><i /> 规则库 GA 36—2018</span><a href="https://baike.baidu.com/item/中华人民共和国机动车号牌/65692407" target="_blank" rel="noreferrer">参考文档 ↗</a></div>
+        <div className="nav-right"><span className="status"><i /> 规则库 GA 36—2018</span><a href="#vehicle-studio">车辆合成</a><a href="https://baike.baidu.com/item/中华人民共和国机动车号牌/65692407" target="_blank" rel="noreferrer">参考文档 ↗</a></div>
       </nav>
 
       <section className="workspace" id="top">
@@ -376,6 +484,51 @@ export default function Home() {
           <div className="actions"><button className="generate" onClick={randomize}><span>↻</span> 随机生成</button><button className="export" onClick={download}>↓ 导出 PNG</button></div>
           <p className="disclaimer">生成内容为随机示意，不代表真实车辆登记信息，请勿用于伪造证件或违法用途。</p>
         </aside>
+      </section>
+
+      <section className="vehicle-studio" id="vehicle-studio">
+        <div className="vehicle-studio-heading">
+          <div><span className="eyebrow">车辆图片合成</span><h2>把当前车牌安装到车辆正面图</h2></div>
+          <p>图片只在本机浏览器处理，不会上传。载入后可直接拖动车牌定位。</p>
+        </div>
+        <div className="vehicle-studio-grid">
+          <div className={`vehicle-photo-stage ${vehicleReady ? "has-image" : ""}`}>
+            {vehicleReady ? (
+              <canvas
+                ref={vehicleCanvas}
+                className="vehicle-canvas"
+                aria-label={`车辆合成预览，车牌 ${formatPlate(plate, kind)}`}
+                role="img"
+                onPointerDown={startMovingVehiclePlate}
+                onPointerMove={moveVehiclePlate}
+                onPointerUp={stopMovingVehiclePlate}
+                onPointerCancel={stopMovingVehiclePlate}
+              />
+            ) : (
+              <label className="vehicle-empty">
+                <span>＋</span>
+                <b>上传车辆正面图片</b>
+                <small>支持 JPG、PNG、WebP · 建议车头居中、车牌区域清晰</small>
+                <input type="file" accept="image/jpeg,image/png,image/webp" onChange={uploadVehicle} />
+              </label>
+            )}
+          </div>
+          <aside className="vehicle-tools">
+            <div className="vehicle-tool-head"><span>定位控制</span><small>{vehicleReady ? vehicleName : "等待车辆图片"}</small></div>
+            <label className="vehicle-upload-button">选择车辆图片<input type="file" accept="image/jpeg,image/png,image/webp" onChange={uploadVehicle} /></label>
+            <div className="vehicle-range-list">
+              <label><span>水平位置 <i>{Math.round(vehiclePlacement.x * 100)}%</i></span><input type="range" min="5" max="95" value={vehiclePlacement.x * 100} disabled={!vehicleReady} onChange={(event) => setPlacementValue("x", Number(event.target.value) / 100)} /></label>
+              <label><span>垂直位置 <i>{Math.round(vehiclePlacement.y * 100)}%</i></span><input type="range" min="5" max="95" value={vehiclePlacement.y * 100} disabled={!vehicleReady} onChange={(event) => setPlacementValue("y", Number(event.target.value) / 100)} /></label>
+              <label><span>车牌宽度 <i>{Math.round(vehiclePlacement.width * 100)}%</i></span><input type="range" min="10" max="60" value={vehiclePlacement.width * 100} disabled={!vehicleReady} onChange={(event) => setPlacementValue("width", Number(event.target.value) / 100)} /></label>
+              <label><span>旋转角度 <i>{vehiclePlacement.rotation.toFixed(1)}°</i></span><input type="range" min="-15" max="15" step="0.5" value={vehiclePlacement.rotation} disabled={!vehicleReady} onChange={(event) => setPlacementValue("rotation", Number(event.target.value))} /></label>
+            </div>
+            <div className="vehicle-tool-actions">
+              <button disabled={!vehicleReady} onClick={() => setVehiclePlacement(DEFAULT_VEHICLE_PLACEMENT)}>恢复默认</button>
+              <button className="vehicle-export" disabled={!vehicleReady} onClick={downloadVehicleComposite}>↓ 导出车辆图片</button>
+            </div>
+            <p>提示：在图片上按住并拖动即可快速移动。切换车牌类型或号码后，车辆预览会同步更新。</p>
+          </aside>
+        </div>
       </section>
 
       <section className="info-strip">
