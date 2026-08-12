@@ -90,6 +90,32 @@ npm run build
 npm run start
 ```
 
+## Docker 部署
+
+从 GitHub Container Registry 拉取公共镜像：
+
+```bash
+docker pull ghcr.io/tdot1415926-svg/china-license-plate-generator:latest
+```
+
+启动容器：
+
+```bash
+docker run --detach \
+  --name china-license-plate-generator \
+  --publish 3000:3000 \
+  ghcr.io/tdot1415926-svg/china-license-plate-generator:latest
+```
+
+浏览器访问 `http://localhost:3000`。镜像同时支持 `linux/amd64` 和 `linux/arm64`。
+
+也可以在项目根目录自行构建：
+
+```bash
+docker build --tag china-license-plate-generator:local .
+docker run --rm --publish 3000:3000 china-license-plate-generator:local
+```
+
 ## 常用命令
 
 | 命令 | 说明 |
