@@ -4,6 +4,10 @@
 
 > 本项目仅用于设计、开发测试和数据集制作，请勿用于伪造号牌或其他违法用途。
 
+## 效果预览
+
+![牌研所实际运行效果：机动车号牌实时预览与生成控制台](docs/screenshots/overview.jpg)
+
 ## 功能
 
 - 支持普通蓝牌、大型汽车前/后黄牌和新能源号牌
@@ -137,6 +141,8 @@ app/
 public/
 ├── models/        # 中国车牌定位模型及其许可证
 └── og.png         # 项目分享封面
+docs/
+└── screenshots/   # README 项目效果截图
 worker/
 └── index.ts       # Cloudflare Worker 入口
 ```
